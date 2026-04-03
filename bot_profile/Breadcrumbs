@@ -1,52 +1,30 @@
-0:00:17 Tab1 StartNav13 #renderer-user #auto_subframe
-0:00:17 Tab1 FinishNav13
-0:00:17 Tab1 PageLoad
-0:00:19 Memory Pressure: None
-0:01:20 Memory Pressure: Moderate
-0:01:30 Memory Pressure: None
-0:01:35 Memory Pressure: Moderate
-0:01:45 Memory Pressure: Moderate
-0:01:50 Memory Pressure: None
-0:01:50 Browser1 Close Tab1 at 0
-0:00:00 Startup
-0:00:00 Tab1 StartNav1 #auto_toplevel
-0:00:00 Browser1 Insert active Tab1 at 0
-0:00:00 Tab1 AddInfobar43
-0:00:00 TouchMode.EnteredNonTouchMode
-0:00:00 Tab1 FinishNav1
-0:00:00 Tab1 PageLoad
-0:00:00 Tab1 StartNav2 #typed
-0:00:00 Tab1 FinishNav2
-0:00:01 Tab1 StartNav3 #renderer-script #link
-0:00:01 Tab1 FinishNav3
-0:00:01 Tab1 StartNav4 #google #renderer-script #auto_subframe
-0:00:01 Tab1 FinishNav4
-0:00:01 Tab1 StartNav5 #renderer-script #auto_subframe
-0:00:01 Tab1 FinishNav5
-0:00:01 Tab1 PageLoad
-0:00:01 Tab1 PageLoad #google
-0:00:01 Tab1 PageLoad
-0:00:01 Tab1 StartNav6 #google #renderer-script #auto_subframe
-0:00:01 Tab1 FinishNav6
-0:00:04 Tab1 StartNav7 #typed
-0:00:05 Tab1 FinishNav7
-0:00:05 Tab1 StartNav8 #renderer-script #link
-0:00:05 Tab1 FinishNav8
-0:00:08 Tab1 StartNav9 #google #renderer-script #auto_subframe
-0:00:08 Tab1 FinishNav9
-0:00:08 Tab1 StartNav10 #renderer-script #auto_subframe
-0:00:08 Tab1 FinishNav10
-0:00:08 Tab1 PageLoad
-0:00:08 Tab1 PageLoad #google
-0:00:08 Tab1 PageLoad
-0:00:08 Tab1 StartNav11 #renderer-script #auto_subframe
-0:00:08 Tab1 FinishNav11
-0:00:08 Tab1 PageLoad
-0:00:09 Tab1 StartNav12 #renderer-script #auto_subframe
-0:00:09 Tab1 FinishNav12
-0:00:09 Tab1 PageLoad
-0:00:12 Widget Closed: StatusBubble
-0:00:14 Tab1 StartNav13 #renderer-user #auto_subframe
-0:00:14 Tab1 FinishNav13
-0:00:14 Tab1 PageLoad
-0:01:18 Browser1 Close Tab1 at 0
+0:00:02 Tab1 StartNav4 #google #renderer-script #auto_subframe
+0:00:03 Tab1 FinishNav4
+0:00:03 Tab1 StartNav5 #renderer-script #auto_subframe
+0:00:03 Tab1 FinishNav5
+0:00:03 Tab1 PageLoad
+0:00:03 Tab1 PageLoad #google
+0:00:03 Tab1 StartNav6 #google #renderer-script #auto_subframe
+0:00:03 Tab1 FinishNav6
+0:00:03 Tab1 PageLoad
+0:00:06 Tab1 StartNav7 #typed
+0:00:06 Tab1 FinishNav7
+0:00:07 Tab1 StartNav8 #renderer-script #link
+0:00:07 Tab1 FinishNav8
+0:00:09 Tab1 StartNav9 #google #renderer-script #auto_subframe
+0:00:10 Tab1 FinishNav9
+0:00:10 Tab1 StartNav10 #renderer-script #auto_subframe
+0:00:10 Tab1 FinishNav10
+0:00:10 Tab1 PageLoad
+0:00:10 Tab1 PageLoad #google
+0:00:10 Tab1 PageLoad
+0:00:10 Tab1 StartNav11 #renderer-script #auto_subframe
+0:00:10 Tab1 FinishNav11
+0:00:10 Tab1 PageLoad
+0:00:10 Tab1 StartNav12 #renderer-script #auto_subframe
+0:00:10 Tab1 FinishNav12
+0:00:10 Tab1 PageLoad
+0:00:15 Tab1 StartNav13 #renderer-user #auto_subframe
+0:00:15 Tab1 FinishNav13
+0:00:15 Tab1 PageLoad
+0:01:29 Browser1 Close Tab1 at 0

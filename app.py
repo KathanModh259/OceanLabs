@@ -31,6 +31,18 @@ load_dotenv()
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 
+# Supabase
+try:
+    from supabase import create_client, Client
+    sb_url = os.environ.get("SUPABASE_URL")
+    sb_key = os.environ.get("SUPABASE_ANON_KEY")
+    if sb_url and sb_key:
+        supabase_client: Client = create_client(sb_url, sb_key)
+    else:
+        supabase_client = None
+except ImportError:
+    supabase_client = None
+
 # Optional dependencies for Online Bot Mode
 try:
     import pyaudiowpatch as pyaudio
@@ -136,7 +148,7 @@ def speaker_id(new_embed):
     speaker_labels.append(new_label)
     return new_label
 
-def process_audio_file(wav_path: str, title: str, language: str, participants: list = None):
+def process_audio_file(wav_path: str, title: str, language: str, participants: list = None, dom_speaker_log: list = None):
     """Core translation pipeline separated from recording mechanism."""
     global speaker_embeddings, speaker_labels, speaker_counter
     speaker_embeddings, speaker_labels, speaker_counter = [], [], 1
@@ -157,6 +169,20 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
         
         filename = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + (title.replace(" ", "_") or "Untitled")
         full_text = ""
+        
+        meeting_db_id = None
+        if supabase_client:
+            try:
+                print("[BOT] Syncing meeting to Supabase Database...")
+                res = supabase_client.table("meetings").insert({
+                    "title": title or "Untitled Meeting",
+                    "language": language,
+                    "status": "recording"
+                }).execute()
+                if res.data and len(res.data) > 0:
+                    meeting_db_id = res.data[0]['id']
+            except Exception as e:
+                print(f"[Supabase Error] Could not create meeting: {e}")
 
         print("Processing segments for speaker detection...")
         for seg in segments:
@@ -166,12 +192,35 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
 
             if len(segment_audio) < samplerate // 4: continue
 
-            try:
-                wav_seg = preprocess_wav(segment_audio, samplerate)
-                embed = encoder.embed_utterance(wav_seg)
-                speaker = speaker_id(embed)
-            except:
-                speaker = "Unknown"
+            speaker = "Unknown"
+            # -----------------------------------------------------
+            # BRANCH A: Online Bot (DOM Mutation Timestamp Mapping)
+            # -----------------------------------------------------
+            if dom_speaker_log and len(dom_speaker_log) > 0:
+                best_match = None
+                min_diff = 9999
+                for ts, name in dom_speaker_log:
+                    diff = abs(ts - seg.start)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_match = name
+                
+                # If we mapped a DOM visual indicator within an arbitrary ~5 second sync window
+                if min_diff < 5.0 and best_match:
+                    speaker = best_match
+                else:
+                    speaker = "Speaker"
+
+            # -----------------------------------------------------
+            # BRANCH B: Local Microphone (Resemblyzer AI Diarization)
+            # -----------------------------------------------------
+            else:
+                try:
+                    wav_seg = preprocess_wav(segment_audio, samplerate)
+                    embed = encoder.embed_utterance(wav_seg)
+                    speaker = speaker_id(embed)
+                except:
+                    speaker = "Unknown"
 
             start_ts = datetime.utcfromtimestamp(seg.start).strftime("%H:%M:%S")
             end_ts = datetime.utcfromtimestamp(seg.end).strftime("%H:%M:%S")
@@ -180,10 +229,33 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
             if language in ["Hindi", "Gujarati"]:
                 text = normalize_text(text, language)
             
+            # Sync individual line to Database
+            if supabase_client and meeting_db_id:
+                try:
+                    supabase_client.table("transcripts").insert({
+                        "meeting_id": meeting_db_id,
+                        "speaker_name": speaker,
+                        "spoken_text": text,
+                        "start_time_seconds": seg.start
+                    }).execute()
+                except Exception as e:
+                    pass
+            
             full_text += f"[{start_ts} - {end_ts}] {speaker}: {text}\n"
 
         print("Generating AI Summary...")
         summary = get_summary(full_text, language, participants)
+        
+        # Save summary out to Database
+        if supabase_client and meeting_db_id:
+            try:
+                supabase_client.table("meetings").update({
+                    "summary": summary,
+                    "status": "completed"
+                }).eq("id", meeting_db_id).execute()
+                print("[BOT] ✅ Successfully persisted final meeting state to Supabase!")
+            except Exception as e:
+                print(f"[Supabase Error] Could not finalize meeting summary: {e}")
 
         output_filename = f"{filename}.txt"
         with open(output_filename, "w", encoding="utf-8") as f:
@@ -290,6 +362,7 @@ def join_meeting_and_record(url: str, title: str, language: str):
             else:
                 print("\n[BOT] ✅ Profile is already authenticated. Skipping login!")
             stream.start_stream()
+            recording_start_time = time.time()
             print("[BOT] Audio recording started (System Volume Loopback active)")
 
             page.goto(url)
@@ -319,12 +392,47 @@ def join_meeting_and_record(url: str, title: str, language: str):
                         return
             threading.Thread(target=check_quit, daemon=True).start()
 
+            dom_speaker_log = []
+            
+            # Turn on Google Meet Captions to expose explicit names
+            try:
+                page.keyboard.press('c')
+                page.wait_for_timeout(1000)
+            except: pass
+            
             # Poll for participants while recording
             while not stop_recording:
                 try:
-                    # Google Meet participants class '.zWGUib'. Highly brittle, varies over time!
-                    names = page.locator('.zWGUib').all_inner_texts()
-                    for n in names: participants.add(n)
+                    # Target the Active Speaker via Captions or Grid
+                    active_label = page.evaluate('''() => {
+                        // 1. Look for Caption speaker names (Google Meet typically bolds the active speaker in captions)
+                        // Common caption speaker name classes: zs7s8d, abjB1e
+                        let captionNames = document.querySelectorAll('.zs7s8d, .abjB1e, div[style*="font-weight: bold"]');
+                        if (captionNames.length > 0) {
+                            // Extract the most recently rendered caption name
+                            let latestCaptionName = captionNames[captionNames.length - 1].innerText;
+                            if (latestCaptionName) return latestCaptionName;
+                        }
+                        
+                        // 2. Fallback to active tile classes (the blue circle that surrounds a speaking participant)
+                        // KxKqVe, FxcRjc, or generic volume indicators
+                        let volumeBars = document.querySelectorAll('.IisKId, .FxcRjc'); // The 3 bouncing bars
+                        if (volumeBars.length > 0) {
+                            // Traverse up to find the container that holds the name
+                            let parent = volumeBars[0].closest('[data-allocation-index]');
+                            if (parent) return parent.innerText;
+                        }
+                        
+                        return "";
+                    }''')
+                    
+                    if active_label:
+                        cleaned_name = active_label.split('\\n')[0].strip() # Take just the first line (the name)
+                        if "You" in cleaned_name or "you" in cleaned_name: cleaned_name = "Meeting Host"
+                        if len(cleaned_name) > 1 and len(cleaned_name) < 25:
+                            rel_timestamp = time.time() - recording_start_time
+                            dom_speaker_log.append((rel_timestamp, cleaned_name.title()))
+                            participants.add(cleaned_name.title())
                 except:
                     pass
                 
@@ -335,7 +443,7 @@ def join_meeting_and_record(url: str, title: str, language: str):
                         break
                 except: pass
                 
-                time.sleep(2)
+                time.sleep(0.5)
 
             stop_recording = True
             stream.stop_stream()
@@ -344,7 +452,7 @@ def join_meeting_and_record(url: str, title: str, language: str):
             context.close()
 
     print("[BOT] Extraction finished.")
-    res = process_audio_file(wav_path, title, language, list(participants))
+    res = process_audio_file(wav_path, title, language, list(participants), dom_speaker_log=dom_speaker_log)
     if os.path.exists(wav_path): os.remove(wav_path)
     return res
 
