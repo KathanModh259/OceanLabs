@@ -1,0 +1,80 @@
+# ──────────────────────────────────────────────
+#  Smart Meeting Notes — .gitignore
+#  OceanLabs Hackathon 2026
+# ──────────────────────────────────────────────
+
+# ── Python Cache & Bytecode ──────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ── Virtual Environments ─────────────────────
+env/
+venv/
+.env/
+.venv/
+
+# ── Environment & Secrets ────────────────────
+.env
+.env.*
+*.env
+secrets.json
+config.local.*
+
+# ── Azure / API Keys ─────────────────────────
+azure_config.json
+api_keys.txt
+
+# ── Whisper / CTranslate2 Model Files ───────
+models/
+*.bin
+*.pt
+*.onnx
+*.npz
+whisper_model/
+ct2_model/
+
+# ── Resemblyzer Speaker Embeddings ──────────
+embeddings/
+*.pkl
+speaker_profiles/
+
+# ── Temporary Audio Files ────────────────────
+*.wav
+*.mp3
+*.m4a
+*.flac
+temp/
+tmp/
+audio_temp/
+
+# ── Output / Transcripts ─────────────────────
+outputs/
+transcripts/
+*.txt
+!README.txt
+
+# ── Build / Distribution ─────────────────────
+build/
+dist/
+*.egg-info/
+*.spec
+*.exe
+
+# ── IDE & Editor Files ───────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS Specific ──────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ─────────────────────────────────────
+*.log
+logs/

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Smart Meeting Notes — OceanLabs Hackathon 2026</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+  @page { size: 900px 1400px; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', Helvetica, Arial, sans-serif;
+    width: 900px;
+    margin: 0 auto;
+    background: #f0ece4;
+    color: #2b2b2b;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .poster {
+    width: 900px;
+    min-height: 1400px;
+    padding: 44px 44px 32px;
+    position: relative;
+  }
+
+  /* Decorative arcs */
+  .poster::before {
+    content: '';
+    position: absolute;
+    top: -120px;
+    right: -120px;
+    width: 380px;
+    height: 380px;
+    border: 40px solid rgba(160,185,185,0.18);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+  .poster::after {
+    content: '';
+    position: absolute;
+    bottom: 60px;
+    left: -100px;
+    width: 300px;
+    height: 300px;
+    border: 35px solid rgba(160,185,185,0.15);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  /* ====== HEADER ====== */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 26px;
+  }
+  .header-left h1 {
+    font-size: 48px;
+    font-weight: 900;
+    color: #1c2b3a;
+    line-height: 1.05;
+    letter-spacing: -0.5px;
+  }
+  .header-right {
+    text-align: right;
+    padding-top: 6px;
+    max-width: 300px;
+  }
+  .header-right .label {
+    font-size: 11px;
+    font-weight: 800;
+    color: #5a7a7a;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 3px;
+  }
+  .header-right .value {
+    font-size: 11px;
+    color: #555;
+    line-height: 1.5;
+    margin-bottom: 12px;
+  }
+
+  /* ====== SECTION BOX ====== */
+  .section {
+    background: #ffffff;
+    border: 1.5px solid #b0c4c4;
+    border-radius: 4px;
+    padding: 18px 20px;
+    position: relative;
+  }
+  .section h2 {
+    font-size: 12px;
+    font-weight: 800;
+    color: #1c2b3a;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 10px;
+  }
+  .section p {
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: #3a3f44;
+  }
+  .section p b { color: #1c2b3a; font-weight: 700; }
+  .section ul {
+    list-style: disc;
+    padding-left: 16px;
+  }
+  .section ul li {
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: #3a3f44;
+    margin-bottom: 2px;
+  }
+  .section ul li strong { color: #1c2b3a; font-weight: 700; }
+
+  /* ====== LAYOUT GRID ====== */
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .row-full {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+
+  /* ====== PIPELINE ====== */
+  .pipe-row {
+    display: flex;
+    gap: 3px;
+    margin-top: 6px;
+  }
+  .pipe-box {
+    flex: 1;
+    background: #c2d3d3;
+    text-align: center;
+    padding: 12px 6px;
+    border-radius: 3px;
+    position: relative;
+  }
+  .pipe-box:not(:last-child)::after {
+    content: '▸';
+    position: absolute;
+    right: -8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #7a9a9a;
+    font-size: 14px;
+    z-index: 1;
+  }
+  .pipe-box .pb-n { font-size: 11px; font-weight: 800; color: #1c2b3a; }
+  .pipe-box .pb-t { font-size: 9px; color: #5a6a6a; margin-top: 2px; }
+
+  /* ====== COMPONENT ARCH ====== */
+  .arch-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .arch-card {
+    background: #eae6de;
+    border-radius: 3px;
+    padding: 10px 12px;
+    border-left: 3px solid #7a9a9a;
+  }
+  .arch-card .ac-name {
+    font-size: 11px;
+    font-weight: 800;
+    color: #1c2b3a;
+    margin-bottom: 2px;
+  }
+  .arch-card .ac-desc {
+    font-size: 9.5px;
+    color: #666;
+    line-height: 1.5;
+  }
+
+  /* ====== SYSTEM FLOW ====== */
+  .flow-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .flow-step {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .flow-num {
+    min-width: 22px;
+    height: 22px;
+    background: #5a7a7a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 800;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .flow-text {
+    font-size: 11px;
+    color: #3a3f44;
+    line-height: 1.5;
+  }
+  .flow-text strong {
+    color: #1c2b3a;
+    font-weight: 700;
+  }
+
+  /* ====== KEY FEATURES ====== */
+  .feat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .feat-item {
+    font-size: 11px;
+    color: #3a3f44;
+    line-height: 1.6;
+    padding: 6px 10px;
+    background: #f6f3ee;
+    border-radius: 3px;
+  }
+  .feat-item strong { color: #1c2b3a; }
+
+  /* ====== TECH TAGS ====== */
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .tag {
+    font-size: 10px; font-weight: 600; color: #1c2b3a;
+    background: #eae6de; border-radius: 3px; padding: 5px 12px;
+  }
+
+  /* ====== COMPARISON TABLE ====== */
+  table.cmp {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 6px;
+  }
+  table.cmp th {
+    font-size: 10px;
+    font-weight: 700;
+    color: #1c2b3a;
+    text-align: left;
+    padding: 7px 8px;
+    border-bottom: 2px solid #b0c4c4;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  table.cmp th:not(:first-child) { text-align: center; }
+  table.cmp td {
+    font-size: 11px;
+    padding: 6px 8px;
+    border-bottom: 1px solid #e0e0e0;
+    color: #444;
+  }
+  table.cmp td:not(:first-child) { text-align: center; font-weight: 600; }
+  table.cmp tr:last-child td { border-bottom: none; }
+  .cmp .y { color: #3a7a50; }
+  .cmp .n { color: #c0c0c0; }
+
+  /* ====== SAMPLE OUTPUT ====== */
+  .samp {
+    background: #2b3a4a;
+    border-radius: 4px;
+    padding: 14px 16px;
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 10px;
+    line-height: 1.75;
+    color: #a0b0c0;
+    margin-top: 6px;
+  }
+  .samp .sh { color: #e0d094; font-weight: 700; font-size: 10.5px; }
+  .samp .ts { color: #c9a840; }
+  .samp .sp { color: #dde4ee; font-weight: 600; }
+  .samp .ac { color: #80b890; font-weight: 600; }
+
+  /* ====== LANG ROW ====== */
+  .lang-row { display: flex; gap: 8px; margin-top: 10px; }
+  .lang-box {
+    flex: 1;
+    background: #eae6de;
+    border-radius: 3px;
+    padding: 8px;
+    text-align: center;
+  }
+  .lang-box .ln { font-size: 13px; font-weight: 800; color: #1c2b3a; }
+  .lang-box .ld { font-size: 9px; color: #777; margin-top: 1px; }
+
+  /* ====== FOOTER ====== */
+  .references {
+    margin-top: 18px;
+    font-size: 9.5px;
+    color: #888;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="poster">
+
+  <!-- ====== HEADER ====== -->
+  <div class="header">
+    <div class="header-left">
+      <h1>SMART<br>MEETING<br>NOTES</h1>
+    </div>
+    <div class="header-right">
+      <div class="label">Event</div>
+      <div class="value">OceanLabs Hackathon 2026</div>
+
+      <div class="label">Project</div>
+      <div class="value">Multilingual meeting transcription with speaker diarization and AI-generated structured summaries.</div>
+
+      <div class="label">Languages</div>
+      <div class="lang-row" style="margin-top:4px;">
+        <div class="lang-box"><div class="ln">EN</div><div class="ld">base.en</div></div>
+        <div class="lang-box"><div class="ln">HI</div><div class="ld">small</div></div>
+        <div class="lang-box"><div class="ln">GU</div><div class="ld">small</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== ROW 1: THE PROBLEM | OUR SOLUTION ====== -->
+  <div class="row">
+    <div class="section">
+      <h2>The Problem</h2>
+      <p>
+        Meetings consume <b>15% of an organization's time</b>, yet <b>73% of professionals</b> multitask during them and action items are forgotten within <b>24 hours</b>. Manual note-taking is unreliable, biased, and forces the note-taker out of active engagement. Most meetings end with no written record at all.
+      </p>
+    </div>
+    <div class="section">
+      <h2>Our Solution</h2>
+      <p>
+        An intelligent, multilingual meeting assistant that automatically records audio, transcribes speech in <b>English, Hindi, and Gujarati</b> with speaker attribution, and generates structured summaries — turning every conversation into accountable, <b>actionable documentation</b>. Transcription runs fully offline for privacy.
+      </p>
+    </div>
+  </div>
+
+  <!-- ====== ROW 2: PROCESSING PIPELINE (full width) ====== -->
+  <div class="row-full">
+    <div class="section">
+      <h2>Processing Pipeline</h2>
+      <div class="pipe-row">
+        <div class="pipe-box"><div class="pb-n">Mic Capture</div><div class="pb-t">SoundDevice · 16kHz</div></div>
+        <div class="pipe-box"><div class="pb-n">WAV Encode</div><div class="pb-t">SciPy · Temp file</div></div>
+        <div class="pipe-box"><div class="pb-n">Whisper STT</div><div class="pb-t">Offline ASR</div></div>
+        <div class="pipe-box"><div class="pb-n">Speaker ID</div><div class="pb-t">Resemblyzer</div></div>
+        <div class="pipe-box"><div class="pb-n">Indic NLP</div><div class="pb-t">Normalization</div></div>
+        <div class="pipe-box"><div class="pb-n">GPT-4.1</div><div class="pb-t">Summarization</div></div>
+        <div class="pipe-box"><div class="pb-n">Export</div><div class="pb-t">.txt output</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== ROW 3: COMPONENT ARCHITECTURE | SYSTEM FLOW ====== -->
+  <div class="row">
+    <div class="section">
+      <h2>Component Architecture</h2>
+      <div class="arch-grid">
+        <div class="arch-card">
+          <div class="ac-name">Audio Engine</div>
+          <div class="ac-desc">SoundDevice capture at 16kHz mono, SciPy WAV encoding</div>
+        </div>
+        <div class="arch-card">
+          <div class="ac-name">ASR Engine</div>
+          <div class="ac-desc">Faster Whisper with CTranslate2 backend, 3 model variants</div>
+        </div>
+        <div class="arch-card">
+          <div class="ac-name">Diarization</div>
+          <div class="ac-desc">Resemblyzer d-vector embeddings, cosine similarity (0.80)</div>
+        </div>
+        <div class="arch-card">
+          <div class="ac-name">Indic Processor</div>
+          <div class="ac-desc">Unicode normalization for Devanagari and Gujarati scripts</div>
+        </div>
+        <div class="arch-card">
+          <div class="ac-name">LLM Summarizer</div>
+          <div class="ac-desc">Azure GPT-4.1 with structured prompt engineering</div>
+        </div>
+        <div class="arch-card">
+          <div class="ac-name">Export Module</div>
+          <div class="ac-desc">Timestamped .txt output with transcript + summary sections</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>System Flow</h2>
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="flow-num">1</div>
+          <div class="flow-text">User sets <strong>title, duration, language</strong></div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">2</div>
+          <div class="flow-text"><strong>Microphone</strong> captures audio at 16kHz mono</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">3</div>
+          <div class="flow-text">Audio saved as <strong>WAV</strong>, sent to Whisper for transcription</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">4</div>
+          <div class="flow-text">Each segment processed by <strong>Resemblyzer</strong> for speaker identification</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">5</div>
+          <div class="flow-text"><strong>Indic NLP</strong> normalizes Hindi/Gujarati text</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">6</div>
+          <div class="flow-text">Full transcript sent to <strong>Azure GPT-4.1</strong> for structured summary</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">7</div>
+          <div class="flow-text">Output exported as <strong>timestamped .txt</strong> file</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== ROW 4: KEY FEATURES | TECHNOLOGY STACK ====== -->
+  <div class="row">
+    <div class="section">
+      <h2>Key Features</h2>
+      <div class="feat-grid">
+        <div class="feat-item"><strong>Offline STT</strong> — Fully local transcription, no data leaves device</div>
+        <div class="feat-item"><strong>3 Languages</strong> — English, Hindi (Devanagari), Gujarati</div>
+        <div class="feat-item"><strong>Speaker ID</strong> — Automatic diarization up to 10 speakers</div>
+        <div class="feat-item"><strong>Timestamps</strong> — HH:MM:SS for every segment</div>
+        <div class="feat-item"><strong>AI Summary</strong> — Agenda, decisions, action items, recommendations</div>
+        <div class="feat-item"><strong>Portable .exe</strong> — Single-file deployment via PyInstaller</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Technology Stack</h2>
+      <div class="tags">
+        <div class="tag">Python 3.9+</div>
+        <div class="tag">Faster Whisper</div>
+        <div class="tag">CTranslate2</div>
+        <div class="tag">Resemblyzer</div>
+        <div class="tag">Azure GPT-4.1</div>
+        <div class="tag">Indic NLP Library</div>
+        <div class="tag">SoundDevice</div>
+        <div class="tag">SciPy</div>
+        <div class="tag">NumPy</div>
+        <div class="tag">PyInstaller</div>
+      </div>
+
+      <p style="margin-top:14px; font-size:11px; line-height:1.7; color:#3a3f44;">
+        <b>Runtime:</b> CPU-only inference (no GPU required)<br>
+        <b>Models:</b> Whisper base.en (EN), Whisper small (HI, GU)<br>
+        <b>Similarity:</b> Cosine threshold 0.80 for speaker matching<br>
+        <b>Performance:</b> Transcription &lt; 2× real-time, summary &lt; 30s
+      </p>
+    </div>
+  </div>
+
+  <!-- ====== ROW 5: COMPETITIVE COMPARISON | SAMPLE OUTPUT ====== -->
+  <div class="row">
+    <div class="section">
+      <h2>Competitive Comparison</h2>
+      <table class="cmp">
+        <tr><th>Feature</th><th>Ours</th><th>Otter.ai</th><th>Fireflies</th></tr>
+        <tr><td>Offline STT</td><td class="y">✔</td><td class="n">✘</td><td class="n">✘</td></tr>
+        <tr><td>Hindi &amp; Gujarati</td><td class="y">✔</td><td class="n">✘</td><td class="n">✘</td></tr>
+        <tr><td>Speaker Diarization</td><td class="y">✔</td><td class="y">✔</td><td class="y">✔</td></tr>
+        <tr><td>Self-hosted / On-Prem</td><td class="y">✔</td><td class="n">✘</td><td class="n">✘</td></tr>
+        <tr><td>Action Items</td><td class="y">✔</td><td class="y">✔</td><td class="y">✔</td></tr>
+        <tr><td>Free / Open Source</td><td class="y">✔</td><td class="n">✘</td><td class="n">✘</td></tr>
+        <tr><td>No GPU Required</td><td class="y">✔</td><td>—</td><td>—</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Sample Output</h2>
+      <div class="samp">
+<span class="sh">TRANSCRIPT</span><br>
+<span class="ts">[00:00:03]</span> <span class="sp">Speaker 1:</span> Let's discuss the Q3 roadmap.<br>
+<span class="ts">[00:00:16]</span> <span class="sp">Speaker 2:</span> We should prioritize the mobile app.<br>
+<span class="ts">[00:00:29]</span> <span class="sp">Speaker 1:</span> Agreed. Let's assign deadlines.<br><br>
+<span class="sh">SUMMARY</span><br>
+<span class="ac">Agenda:</span> Q3 product roadmap<br>
+<span class="ac">Key Decision:</span> Mobile-first strategy for Q3<br>
+<span class="ac">Action Items:</span><br>
+&nbsp; 1. Speaker 1 — Finalize roadmap by Friday<br>
+&nbsp; 2. Speaker 2 — Prepare resource allocation report<br>
+<span class="ac">Speakers:</span> 2 unique speakers identified
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
