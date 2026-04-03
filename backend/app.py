@@ -49,8 +49,10 @@ try:
     if sb_url and sb_key:
         supabase_client: Client = create_client(sb_url, sb_key)
     else:
+        print("[Supabase Warning] SUPABASE_URL or SUPABASE key is missing. Database sync is disabled.")
         supabase_client = None
-except ImportError:
+except ImportError as import_error:
+    print(f"[Supabase Warning] Python package 'supabase' is not installed. Database sync is disabled. Details: {import_error}")
     supabase_client = None
 
 # Optional dependencies for Online Bot Mode
@@ -307,6 +309,21 @@ models = {
     "english": WhisperModel("base.en", device="cpu", compute_type="float32"),
     "multilingual": WhisperModel("small", device="cpu", compute_type="float32")
 }
+
+# Accept common user-entered language variants from the UI text box.
+LANGUAGE_ALIASES = {
+    "en": "english",
+    "eng": "english",
+    "english": "english",
+    "hi": "hindi",
+    "hin": "hindi",
+    "hindi": "hindi",
+    "gu": "gujarati",
+    "guj": "gujarati",
+    "gujarati": "gujarati",
+    "gujrati": "gujarati",
+}
+
 language_map = {
     "english": "en",
     "hindi": "hi",
@@ -335,15 +352,43 @@ def normalize_text(text: str, language: str) -> str:
     tokens = indic_tokenize.trivial_tokenize(chars)
     return " ".join(tokens)
 
-def resolve_transcription_mode(language: str):
+
+def normalize_language_choice(language: str):
     selected = (language or "Auto").strip()
     selected_lower = selected.lower()
+    canonical_key = LANGUAGE_ALIASES.get(selected_lower, selected_lower)
 
-    if selected_lower == "english":
+    if canonical_key == "english":
+        return "English", "english"
+    if canonical_key == "hindi":
+        return "Hindi", "hindi"
+    if canonical_key == "gujarati":
+        return "Gujarati", "gujarati"
+
+    return selected if selected else "Auto", canonical_key
+
+
+def transcribe_segments_with_fallback(model, wav_path: str, language_hint: str | None):
+    segments, info = model.transcribe(wav_path, language=language_hint)
+    segment_list = list(segments)
+    has_text = any((getattr(seg, "text", "") or "").strip() for seg in segment_list)
+
+    # Forced language can occasionally yield no text for short/noisy clips; retry in auto mode.
+    if has_text or language_hint is None:
+        return segment_list, info, language_hint
+
+    print(f"[Transcription Warning] No text with forced language '{language_hint}'. Retrying with auto language detection...")
+    retry_segments, retry_info = model.transcribe(wav_path, language=None)
+    retry_list = list(retry_segments)
+    return retry_list, retry_info, None
+
+def resolve_transcription_mode(language: str):
+    mode_label, canonical_key = normalize_language_choice(language)
+
+    if canonical_key == "english":
         return models["english"], "en", "English"
 
-    language_hint = language_map.get(selected_lower)
-    mode_label = selected if selected else "Auto"
+    language_hint = language_map.get(canonical_key)
     return models["multilingual"], language_hint, mode_label
 
 
@@ -415,8 +460,9 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
 
     try:
         model, language_hint, mode_label = resolve_transcription_mode(language)
-        print(f"Transcribing with {mode_label} mode...")
-        segments, info = model.transcribe(wav_path, language=language_hint)
+        hint_label = language_hint if language_hint else "auto"
+        print(f"Transcribing with {mode_label} mode (language hint: {hint_label})...")
+        segments, info, used_language_hint = transcribe_segments_with_fallback(model, wav_path, language_hint)
         detected_language = getattr(info, "language", None)
         language_for_storage = detected_language or mode_label
         
@@ -454,13 +500,20 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
                 else:
                     print(f"[Supabase Error] Could not create meeting: {e}")
 
+        if used_language_hint is None and language_hint is not None:
+            print("[Transcription Info] Used auto language fallback after forced language produced no text.")
+
         print("Processing segments for speaker detection...")
         for seg in segments:
             start_idx = int(seg.start * samplerate)
             end_idx = int(seg.end * samplerate)
             segment_audio = audio_data[start_idx:end_idx].flatten()
+            text = (seg.text or "").strip()
 
-            if len(segment_audio) < samplerate // 4: continue
+            if len(segment_audio) < samplerate // 4 and not text:
+                continue
+            if not text:
+                continue
 
             speaker = "Unknown"
             # -----------------------------------------------------
@@ -494,7 +547,6 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
 
             start_ts = datetime.utcfromtimestamp(seg.start).strftime("%H:%M:%S")
             end_ts = datetime.utcfromtimestamp(seg.end).strftime("%H:%M:%S")
-            text = seg.text.strip()
             
             # Sync individual line to Database
             if supabase_client and meeting_db_id:
@@ -510,8 +562,16 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
             
             full_text += f"[{start_ts} - {end_ts}] {speaker}: {text}\n"
 
-        print("Generating AI Summary...")
-        summary = get_summary(full_text, language_for_storage, participants)
+        if not full_text.strip():
+            print("[Transcription Warning] No speech text detected in recording.")
+            summary = (
+                "No speech could be transcribed from this recording. "
+                "Please speak for at least 5 to 10 seconds, check microphone/system audio, "
+                "and try again with Auto, Hindi, or Gujarati language mode."
+            )
+        else:
+            print("Generating AI Summary...")
+            summary = get_summary(full_text, language_for_storage, participants)
         
         # Save summary out to Database
         if supabase_client and meeting_db_id:
