@@ -8,7 +8,8 @@ import {
     IconBrandGoogleFilled,
     IconVideoFilled,
     IconVideoPlusFilled,
-    IconBrandDiscordFilled
+    IconBrandDiscordFilled,
+    IconBrandTeams
 } from "@tabler/icons-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -37,6 +38,7 @@ const PlatformIcon = ({
         case "discord": return <IconBrandDiscordFilled className="size-7 text-indigo-500" />;
         case "slack": return <IconBrandSlack className="size-7 text-[#4A154B]" />;
         case "google": return <IconBrandGoogleFilled className="size-7 text-red-500" />;
+        case "teams": return <IconBrandTeams className="size-7 text-[#5856D6]" />;
         default: return <IconVideo className="size-7" />;
     }
 }

@@ -16,8 +16,9 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Calendar, CalendarClock, CalendarDays, CircleCheckBig, CircleUserRound, MapPinned, Video } from "lucide-react"
 import { FilterSection } from "./FilterSection"
+import { Checkbox } from "@/components/ui/checkbox"
 
-export const SidebarFilters = () => {
+export const SidebarFilters = ({ selectedPlatforms = ['meet', 'teams', 'zoom'], onPlatformChange }) => {
     const [isStatusOpen, setIsStatusOpen] = React.useState(true)
     const [isLocationOpen, setIsLocationOpen] = React.useState(true)
 
@@ -175,6 +176,36 @@ export const SidebarFilters = () => {
                         </div>
                     </div>
                 </FilterSection>
+
+                <FilterSection title="Meeting Platform">
+  <div className="space-y-2">
+    {[
+      { id: 'meet', label: 'Google Meet' },
+      { id: 'teams', label: 'Microsoft Teams' },
+      { id: 'zoom', label: 'Zoom' },
+    ].map((platform) => (
+      <div key={platform.id} className="flex items-center space-x-2">
+        <Checkbox
+          id={`platform-${platform.id}`}
+          checked={selectedPlatforms.includes(platform.id)}
+          onCheckedChange={(checked) => {
+            if (checked) {
+              onPlatformChange([...selectedPlatforms, platform.id])
+            } else {
+              onPlatformChange(selectedPlatforms.filter(p => p !== platform.id))
+            }
+          }}
+        />
+        <Label
+          htmlFor={`platform-${platform.id}`}
+          className="font-medium tracking-tight text-neutral-600 dark:text-neutral-300 capitalize"
+        >
+          {platform.label}
+        </Label>
+      </div>
+    ))}
+  </div>
+</FilterSection>
 
                 <FilterSection title="Others">
                     <div className="space-y-2">

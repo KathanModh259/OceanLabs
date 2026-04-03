@@ -50,17 +50,22 @@ temp/
 tmp/
 audio_temp/
 
+# ── Runtime Browser Profile (Generated) ─────
+backend/bot_profile/
+
 # ── Output / Transcripts ─────────────────────
 outputs/
 transcripts/
 *.txt
 !README.txt
+!backend/requirements.txt
 
 # ── Build / Distribution ─────────────────────
 build/
 dist/
 *.egg-info/
 *.spec
+!backend/app.spec
 *.exe
 
 # ── IDE & Editor Files ───────────────────────
