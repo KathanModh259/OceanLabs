@@ -62,3 +62,21 @@ export async function getRecordingDetails(recordingId) {
 
   return response.json()
 }
+
+/**
+ * Stop an active recording
+ * @param {string} recordingId
+ * @returns {Promise<Object>}
+ */
+export async function stopRecording(recordingId) {
+  const response = await fetch(`${API_BASE}/api/stop-recording/${recordingId}`, {
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: '' }))
+    throw new Error(toApiErrorMessage(response, error.detail, 'Failed to stop recording'))
+  }
+
+  return response.json()
+}

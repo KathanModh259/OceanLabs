@@ -536,17 +536,52 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
         print(f"Transcription error: {str(e)}")
         return str(e), "", None
 
-def record_local(minutes: float, title: str, language: str):
-    """Workflow 1: Local Microphone Capture"""
-    duration = int(minutes * 60)
-    print(f"Recording from local microphone for {minutes:.2f} minutes...")
-    audio = sd.rec(int(SAMPLE_RATE * duration), samplerate=SAMPLE_RATE, channels=1)
-    sd.wait()
-    print("Recording complete.")
+def record_local(minutes: float, title: str, language: str, stop_event=None):
+    """Workflow 1: Local Microphone Capture.
+
+    If stop_event is provided, recording continues until stop_event is set.
+    """
+    timed_mode = minutes is not None and minutes > 0
+    if not timed_mode and stop_event is None:
+        raise RuntimeError("Local recording requires a duration or a stop signal")
+
+    if timed_mode and stop_event is None:
+        duration = int(minutes * 60)
+        print(f"Recording from local microphone for {minutes:.2f} minutes...")
+        audio = sd.rec(int(SAMPLE_RATE * duration), samplerate=SAMPLE_RATE, channels=1)
+        sd.wait()
+    else:
+        print("Recording from local microphone... Use Stop Recording in the app when done.")
+        chunks = []
+        started_at = time.time()
+        # Safety cap avoids runaway recording if stop is never triggered.
+        safety_limit_seconds = int(minutes * 60) if timed_mode else 4 * 60 * 60
+
+        def callback(indata, frames, time_info, status):
+            if status:
+                print(f"Audio callback status: {status}")
+            chunks.append(indata.copy())
+
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=callback):
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if safety_limit_seconds and (time.time() - started_at) >= safety_limit_seconds:
+                    print("Reached local recording safety limit. Stopping capture.")
+                    break
+                time.sleep(0.1)
+
+        if not chunks:
+            raise RuntimeError("No audio was captured from local microphone")
+        audio = np.concatenate(chunks, axis=0)
+
+    print("Recording complete. Processing transcription...")
+    if audio.ndim > 1:
+        audio = audio[:, 0]
 
     wav_path = "temp_local.wav"
-    wavfile.write(wav_path, SAMPLE_RATE, (audio * 32767).astype(np.int16))
-    
+    wavfile.write(wav_path, SAMPLE_RATE, (np.clip(audio, -1, 1) * 32767).astype(np.int16))
+
     res = process_audio_file(wav_path, title, language, None, None, platform="local")
     if os.path.exists(wav_path): os.remove(wav_path)
     return res

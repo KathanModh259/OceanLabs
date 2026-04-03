@@ -120,6 +120,7 @@ class StartRecordingRequest(BaseModel):
     url: Optional[str] = None  # Required for online platforms
     language: str = "Auto"
     duration_minutes: Optional[float] = None  # For local mode
+    manual_stop: bool = False  # For local mode: start now, stop via API
 
 @app.post("/api/start-recording")
 async def start_recording(req: StartRecordingRequest, request: Request):
@@ -146,20 +147,36 @@ async def start_recording(req: StartRecordingRequest, request: Request):
         meeting_url = validate_meeting_url(meeting_url, platform)
 
     duration_minutes = req.duration_minutes
-    if platform == "local" and not duration_minutes:
-        raise HTTPException(status_code=400, detail="Duration required for local recording")
-    if platform == "local" and duration_minutes:
-        if duration_minutes < 0.1 or duration_minutes > 240:
+    manual_stop = bool(req.manual_stop)
+    if platform == "local":
+        if duration_minutes is not None and (duration_minutes < 0.1 or duration_minutes > 240):
             raise HTTPException(status_code=400, detail="Duration must be between 0.1 and 240 minutes")
+        if not manual_stop and duration_minutes is None:
+            raise HTTPException(status_code=400, detail="Duration required for local recording")
 
     join_meeting_and_record_fn, record_local_fn = load_recording_runtime()
 
     recording_id = str(uuid.uuid4())
+    stop_event = threading.Event() if platform == "local" and manual_stop else None
+
+    active_recordings[recording_id] = {
+        "status": "recording",
+        "platform": platform,
+        "title": title,
+        "url": meeting_url,
+        "language": language,
+        "created_at": int(time.time()),
+        "summary": "",
+        "transcript": "",
+        "output_filename": None,
+        "stop_event": stop_event,
+    }
 
     def run_bot():
         try:
             if platform == "local":
-                result = record_local_fn(duration_minutes, title, language)
+                stop_flag = active_recordings.get(recording_id, {}).get("stop_event")
+                result = record_local_fn(duration_minutes, title, language, stop_event=stop_flag)
             else:
                 result = join_meeting_and_record_fn(
                     url=meeting_url,
@@ -196,17 +213,6 @@ async def start_recording(req: StartRecordingRequest, request: Request):
 
     thread = threading.Thread(target=run_bot, daemon=True)
     thread.start()
-    active_recordings[recording_id] = {
-        "status": "recording",
-        "platform": platform,
-        "title": title,
-        "url": meeting_url,
-        "language": language,
-        "created_at": int(time.time()),
-        "summary": "",
-        "transcript": "",
-        "output_filename": None,
-    }
     return {"recording_id": recording_id, "status": "started"}
 
 @app.get("/api/recordings")
@@ -251,5 +257,22 @@ async def get_recording_details(recording_id: str):
 
 @app.post("/api/stop-recording/{recording_id}")
 async def stop_recording(recording_id: str):
-    """Stop an active recording. (Not implemented: would need a stop flag)"""
-    raise HTTPException(status_code=501, detail="Stop endpoint not implemented - use console 'q' to stop")
+    """Stop an active local recording and trigger transcription."""
+    info = active_recordings.get(recording_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    status = (info.get("status") or "").lower()
+    if status in {"completed", "error"}:
+        return {"recording_id": recording_id, "status": status}
+
+    if info.get("platform") != "local":
+        raise HTTPException(status_code=400, detail="Stop is currently supported only for local recordings")
+
+    stop_event = info.get("stop_event")
+    if stop_event is None:
+        raise HTTPException(status_code=400, detail="This recording does not support manual stop")
+
+    stop_event.set()
+    info["status"] = "stopping"
+    return {"recording_id": recording_id, "status": "stopping"}

@@ -18,15 +18,12 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Loader2, Mic, Plus, Video } from 'lucide-react'
-import { startRecording } from '@/lib/api'
-import { supabase } from '@/lib/supabase'
+import { listRecordings, startRecording, stopRecording } from '@/lib/api'
 
 const MAX_TITLE_LENGTH = 120
 const MAX_LANGUAGE_LENGTH = 40
-const MAX_OFFLINE_DETAILS_LENGTH = 2200
-const MAX_SPEAKER_NOTES_LENGTH = 5000
-const MAX_TRANSCRIPT_ROWS = 250
-const PLATFORM_SCHEMA_ERROR_TEXT = "could not find the 'platform' column of 'meetings' in the schema cache"
+const OFFLINE_STATUS_POLL_INTERVAL_MS = 2000
+const OFFLINE_STATUS_POLL_ATTEMPTS = 120
 
 const PLATFORM_HOST_RULES = {
   meet: ['meet.google.com'],
@@ -43,15 +40,7 @@ function toFriendlyError(message) {
   if (normalized.includes('does not match selected platform')) {
     return 'The link does not match selected platform. For Google Meet, paste full link or meeting code like cyo-qfpw-fir.'
   }
-  if (normalized.includes(PLATFORM_SCHEMA_ERROR_TEXT)) {
-    return "Supabase schema is missing meetings.platform. Run: ALTER TABLE public.meetings ADD COLUMN platform text DEFAULT 'meet';"
-  }
   return message
-}
-
-function isPlatformSchemaError(error) {
-  const combined = `${error?.message || ''} ${error?.details || ''}`.toLowerCase()
-  return combined.includes(PLATFORM_SCHEMA_ERROR_TEXT)
 }
 
 function normalizeOnlineMeetingUrl(rawUrl, platform) {
@@ -94,25 +83,8 @@ function validateOnlineMeetingUrl(rawUrl, platform) {
   return parsed.toString()
 }
 
-function buildOfflineTranscriptRows(rawSpeakerNotes, meetingId) {
-  const lines = rawSpeakerNotes
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, MAX_TRANSCRIPT_ROWS)
-
-  return lines.map((line, index) => {
-    const separator = line.indexOf(':')
-    const speakerName = separator > 0 ? line.slice(0, separator).trim() : 'Participant'
-    const spokenText = separator > 0 ? line.slice(separator + 1).trim() : line
-
-    return {
-      meeting_id: meetingId,
-      speaker_name: (speakerName || 'Participant').slice(0, 80),
-      spoken_text: (spokenText || line).slice(0, 500),
-      start_time_seconds: index * 15,
-    }
-  })
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export function StartRecordingDialog({
@@ -126,12 +98,15 @@ export function StartRecordingDialog({
   const [platform, setPlatform] = useState('meet')
   const [language, setLanguage] = useState('Auto')
   const [url, setUrl] = useState('')
-  const [offlineDetails, setOfflineDetails] = useState('')
-  const [speakerNotes, setSpeakerNotes] = useState('')
+  const [offlineRecordingId, setOfflineRecordingId] = useState('')
+  const [offlineTranscribing, setOfflineTranscribing] = useState(false)
+  const [offlineStateMessage, setOfflineStateMessage] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   const isOnline = meetingType === 'online'
+  const isOfflineRecordingActive = !!offlineRecordingId
+  const isDialogLocked = isOfflineRecordingActive || offlineTranscribing
 
   const resetForm = () => {
     setMeetingType('online')
@@ -139,100 +114,80 @@ export function StartRecordingDialog({
     setPlatform('meet')
     setLanguage('Auto')
     setUrl('')
-    setOfflineDetails('')
-    setSpeakerNotes('')
+    setOfflineRecordingId('')
+    setOfflineTranscribing(false)
+    setOfflineStateMessage('')
     setError('')
   }
 
   const handleDialogChange = (nextOpen) => {
+    if (!nextOpen && isDialogLocked) {
+      setError('Stop and complete the current offline recording before closing this dialog.')
+      return
+    }
+
     setOpen(nextOpen)
     if (!nextOpen) resetForm()
   }
 
+  const handleMeetingTypeChange = (nextMeetingType) => {
+    if (!isOnline && isDialogLocked && nextMeetingType !== 'offline') {
+      setError('Stop the active offline recording before switching meeting type.')
+      return
+    }
+    setMeetingType(nextMeetingType)
+    setError('')
+  }
+
+  const getNormalizedMeetingData = () => {
+    const normalizedTitle = (title.trim() || 'Untitled Meeting').slice(0, MAX_TITLE_LENGTH)
+    const normalizedLanguage = ((language || 'Auto').trim() || 'Auto').slice(0, MAX_LANGUAGE_LENGTH)
+    return { normalizedTitle, normalizedLanguage }
+  }
+
+  const waitForOfflineCompletion = async (recordingId) => {
+    for (let attempt = 0; attempt < OFFLINE_STATUS_POLL_ATTEMPTS; attempt += 1) {
+      const sessions = await listRecordings()
+      const session = (sessions || []).find((entry) => entry.id === recordingId)
+
+      if (session) {
+        const status = (session.status || '').toLowerCase()
+        if (status === 'completed' || status === 'error') {
+          return session
+        }
+      }
+
+      await wait(OFFLINE_STATUS_POLL_INTERVAL_MS)
+    }
+
+    throw new Error('Transcription is taking longer than expected. Keep dashboard open and check notes shortly.')
+  }
+
   const handleSubmit = async (event) => {
     event.preventDefault()
+    if (!isOnline) return
+
     setLoading(true)
     setError('')
 
-    const normalizedTitle = (title.trim() || 'Untitled Meeting').slice(0, MAX_TITLE_LENGTH)
-    const normalizedLanguage = ((language || 'Auto').trim() || 'Auto').slice(0, MAX_LANGUAGE_LENGTH)
+    const { normalizedTitle, normalizedLanguage } = getNormalizedMeetingData()
 
     try {
-      if (isOnline) {
-        if (!url.trim()) throw new Error('Meeting link is required for online meetings.')
-        const safeMeetingUrl = validateOnlineMeetingUrl(url, platform)
+      if (!url.trim()) throw new Error('Meeting link is required for online meetings.')
+      const safeMeetingUrl = validateOnlineMeetingUrl(url, platform)
 
-        await startRecording({
-          title: normalizedTitle,
-          platform,
-          language: normalizedLanguage,
-          url: safeMeetingUrl,
-        })
+      await startRecording({
+        title: normalizedTitle,
+        platform,
+        language: normalizedLanguage,
+        url: safeMeetingUrl,
+      })
 
-        onCreated?.({
-          meetingType: 'online',
-          title: normalizedTitle,
-          message: 'Meeting assistant join request sent. Admit it when prompted in the call.',
-        })
-      } else {
-        const safeOfflineDetails = offlineDetails.trim().slice(0, MAX_OFFLINE_DETAILS_LENGTH)
-        const safeSpeakerNotes = speakerNotes.slice(0, MAX_SPEAKER_NOTES_LENGTH)
-
-        const formattedSummary = safeOfflineDetails
-          ? `Offline meeting details:\n${safeOfflineDetails}`
-          : 'Offline meeting was added manually.'
-
-        let meetingRow = null
-        let meetingError = null
-
-        const insertWithPlatform = await supabase
-          .from('meetings')
-          .insert({
-            title: normalizedTitle,
-            platform: 'offline',
-            language: normalizedLanguage,
-            status: 'completed',
-            summary: formattedSummary,
-          })
-          .select('*')
-          .single()
-
-        meetingRow = insertWithPlatform.data
-        meetingError = insertWithPlatform.error
-
-        if (meetingError && isPlatformSchemaError(meetingError)) {
-          const insertWithoutPlatform = await supabase
-            .from('meetings')
-            .insert({
-              title: normalizedTitle,
-              language: normalizedLanguage,
-              status: 'completed',
-              summary: formattedSummary,
-            })
-            .select('*')
-            .single()
-
-          meetingRow = insertWithoutPlatform.data
-          meetingError = insertWithoutPlatform.error
-        }
-
-        if (meetingError) throw meetingError
-
-        const transcriptRows = buildOfflineTranscriptRows(safeSpeakerNotes, meetingRow.id)
-        if (transcriptRows.length > 0) {
-          const { error: transcriptError } = await supabase
-            .from('transcripts')
-            .insert(transcriptRows)
-
-          if (transcriptError) throw transcriptError
-        }
-
-        onCreated?.({
-          meetingType: 'offline',
-          title: normalizedTitle,
-          message: 'Offline meeting saved to Supabase.',
-        })
-      }
+      onCreated?.({
+        meetingType: 'online',
+        title: normalizedTitle,
+        message: 'Meeting assistant join request sent. Admit it when prompted in the call.',
+      })
 
       setOpen(false)
       resetForm()
@@ -240,6 +195,74 @@ export function StartRecordingDialog({
       setError(toFriendlyError(submitError?.message))
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleStartOfflineRecording = async () => {
+    setError('')
+    setLoading(true)
+
+    const { normalizedTitle, normalizedLanguage } = getNormalizedMeetingData()
+
+    try {
+      const response = await startRecording({
+        title: normalizedTitle,
+        platform: 'local',
+        language: normalizedLanguage,
+        manual_stop: true,
+      })
+
+      setOfflineRecordingId(response.recording_id)
+      setOfflineStateMessage('Recording started. Speak now and click Stop Recording when you are done.')
+    } catch (startError) {
+      setError(toFriendlyError(startError?.message))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleStopOfflineRecording = async () => {
+    if (!offlineRecordingId) return
+
+    setError('')
+    setLoading(true)
+    setOfflineTranscribing(true)
+    setOfflineStateMessage('Stopping recording. Transcription will begin in a few seconds...')
+
+    const { normalizedTitle } = getNormalizedMeetingData()
+
+    try {
+      await stopRecording(offlineRecordingId)
+    } catch (stopError) {
+      setError(toFriendlyError(stopError?.message))
+      setLoading(false)
+      setOfflineTranscribing(false)
+      return
+    }
+
+    setOfflineStateMessage('Recording stopped. Transcribing audio and preparing notes...')
+
+    try {
+      const finalSession = await waitForOfflineCompletion(offlineRecordingId)
+      if ((finalSession?.status || '').toLowerCase() === 'error') {
+        throw new Error(finalSession?.error || 'Offline recording failed to process.')
+      }
+
+      onCreated?.({
+        meetingType: 'offline',
+        title: normalizedTitle,
+        message: 'Offline recording completed. Notes are ready.',
+      })
+
+      setOpen(false)
+      resetForm()
+    } catch (processingError) {
+      setError(toFriendlyError(processingError?.message))
+      setOfflineRecordingId('')
+      setOfflineStateMessage('')
+    } finally {
+      setLoading(false)
+      setOfflineTranscribing(false)
     }
   }
 
@@ -268,14 +291,14 @@ export function StartRecordingDialog({
             Create Meeting Event
           </DialogTitle>
           <DialogDescription className="text-sm text-neutral-600">
-            Choose online or offline meeting. Online meetings will trigger the bot to request entry automatically.
+            Choose online or offline meeting. Offline mode records your voice, then transcribes automatically after stop.
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4 px-6 py-5">
           <div className="grid gap-1.5">
             <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Meeting Type</label>
-            <Select value={meetingType} onValueChange={setMeetingType}>
+            <Select value={meetingType} onValueChange={handleMeetingTypeChange}>
               <SelectTrigger className="h-10 border-neutral-200 bg-neutral-50">
                 <SelectValue placeholder="Select type" />
               </SelectTrigger>
@@ -343,27 +366,15 @@ export function StartRecordingDialog({
             </>
           ) : (
             <>
-              <div className="grid gap-1.5">
-                <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Offline Meeting Details</label>
-                <textarea
-                  value={offlineDetails}
-                  onChange={(event) => setOfflineDetails(event.target.value)}
-                  placeholder="Agenda, location, attendees, and context"
-                  maxLength={MAX_OFFLINE_DETAILS_LENGTH}
-                  className="min-h-24 rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-800 outline-none focus:border-indigo-400"
-                />
+              <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+                Voice command flow: Start recording, speak naturally, then Stop recording to trigger transcription.
               </div>
 
-              <div className="grid gap-1.5">
-                <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Who Spoke What (Optional)</label>
-                <textarea
-                  value={speakerNotes}
-                  onChange={(event) => setSpeakerNotes(event.target.value)}
-                  placeholder={"Example:\nAman: Finalize proposal today\nRiya: Share budget updates by 5 PM"}
-                  maxLength={MAX_SPEAKER_NOTES_LENGTH}
-                  className="min-h-28 rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-800 outline-none focus:border-indigo-400"
-                />
-              </div>
+              {offlineStateMessage ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                  {offlineStateMessage}
+                </div>
+              ) : null}
             </>
           )}
 
@@ -374,19 +385,65 @@ export function StartRecordingDialog({
           ) : null}
 
           <DialogFooter className="border-t border-neutral-200 pt-4">
-            <Button type="button" variant="outline" onClick={() => setOpen(false)} className="h-10 border-neutral-300">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setOpen(false)}
+              className="h-10 border-neutral-300"
+              disabled={loading || isDialogLocked}
+            >
               Cancel
             </Button>
-            <Button type="submit" disabled={loading} className="h-10 bg-indigo-600 font-semibold text-white hover:bg-indigo-500">
-              {loading ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Saving...
-                </>
-              ) : (
-                'Create Event'
-              )}
-            </Button>
+
+            {isOnline ? (
+              <Button type="submit" disabled={loading} className="h-10 bg-indigo-600 font-semibold text-white hover:bg-indigo-500">
+                {loading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  'Create Event'
+                )}
+              </Button>
+            ) : offlineTranscribing ? (
+              <Button type="button" disabled className="h-10 bg-indigo-600 font-semibold text-white">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Transcribing...
+              </Button>
+            ) : isOfflineRecordingActive ? (
+              <Button
+                type="button"
+                onClick={handleStopOfflineRecording}
+                disabled={loading}
+                className="h-10 bg-rose-600 font-semibold text-white hover:bg-rose-500"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Stopping...
+                  </>
+                ) : (
+                  'Stop Recording'
+                )}
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                onClick={handleStartOfflineRecording}
+                disabled={loading}
+                className="h-10 bg-indigo-600 font-semibold text-white hover:bg-indigo-500"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Starting...
+                  </>
+                ) : (
+                  'Start Voice Recording'
+                )}
+              </Button>
+            )}
           </DialogFooter>
         </form>
       </DialogContent>

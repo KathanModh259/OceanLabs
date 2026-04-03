@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, ArrowRight, CheckCircle2, Database, Globe2, Loader2, Mic, Search, Sparkles, Video, X } from 'lucide-react'
+import { Activity, ArrowRight, CheckCircle2, Database, Globe2, Loader2, Mic, Search, Sparkles, X } from 'lucide-react'
 import { supabase } from './lib/supabase'
 import { getRecordingDetails, listRecordings } from './lib/api'
 import { Button } from '@/components/ui/button'
@@ -718,7 +718,10 @@ export default function App() {
         const data = await listRecordings()
         if (!active) return
         const sessions = data || []
-        const running = sessions.filter((entry) => entry.status === 'recording').length
+        const running = sessions.filter((entry) => {
+          const status = (entry?.status || '').toLowerCase()
+          return status === 'recording' || status === 'stopping' || status === 'transcribing'
+        }).length
         setRecordingSessions(sessions)
         setActiveRecordings(running)
       } catch {
@@ -811,14 +814,17 @@ export default function App() {
 
   const apiDerivedMeetings = useMemo(() => {
     return recordingSessions.map((entry) => {
+      const status = (entry?.status || 'recording').toLowerCase()
       const createdAt = entry?.created_at
         ? new Date(entry.created_at * 1000).toISOString()
         : new Date().toISOString()
 
       const baseSummary =
-        entry?.status === 'recording'
+        status === 'recording'
           ? 'Recording is in progress from backend session.'
-          : entry?.status === 'error'
+          : status === 'stopping' || status === 'transcribing'
+            ? 'Recording stopped. Transcription is in progress.'
+            : status === 'error'
             ? `Recording session failed: ${entry?.error || 'Unknown error'}`
             : 'Recording session completed in backend runtime.'
 
@@ -827,7 +833,7 @@ export default function App() {
         recordingId: entry.id,
         title: entry?.title || 'Untitled Meeting',
         platform: entry?.platform || 'meet',
-        status: entry?.status || 'recording',
+        status,
         language: entry?.language || 'Auto',
         summary: entry?.summary || baseSummary,
         createdAt,
@@ -1161,11 +1167,6 @@ export default function App() {
         loading={transcriptsLoading}
         onClose={() => setSelectedMeeting(null)}
       />
-
-      <div className="pointer-events-none fixed bottom-4 left-4 hidden items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 md:flex">
-        <Video className="h-3.5 w-3.5" />
-        Meeting assistant online capture enabled
-      </div>
 
       {activeRecordings > 0 ? (
         <div className="pointer-events-none fixed bottom-4 right-4 flex items-center gap-2 rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-lg shadow-emerald-300/60">
