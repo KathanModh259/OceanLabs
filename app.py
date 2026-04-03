@@ -1,18 +1,44 @@
+import os
+import sys
+
+# Auto-fix shadowing issue: the local 'resemblyzer' folder breaks the python module import.
+if os.path.exists('resemblyzer') and os.path.isdir('resemblyzer') and not os.path.exists('resemblyzer/__init__.py'):
+    try:
+        os.rename('resemblyzer', 'resemblyzer_model')
+        print("✅ Fixed module shadowing: renamed 'resemblyzer' to 'resemblyzer_model'")
+    except Exception as e:
+        print(f"Failed to rename 'resemblyzer' directory: {e}")
+
 import numpy as np
 import sounddevice as sd
-from scipy.io.wavfile import write
-from resemblyzer import preprocess_wav, VoiceEncoder
+from scipy.io import wavfile
+from resemblyzer import VoiceEncoder
+from resemblyzer.audio import preprocess_wav
 from faster_whisper import WhisperModel
-import os
 import tempfile
 from datetime import datetime
 from indicnlp.normalize import indic_normalize
 from indicnlp.tokenize import indic_tokenize
 import re
-import sys
+import wave
+import time
+import threading
+
+# Azure & Dotenv
 from azure.ai.inference import ChatCompletionsClient
+from dotenv import load_dotenv
+load_dotenv()
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
+
+# Optional dependencies for Online Bot Mode
+try:
+    import pyaudiowpatch as pyaudio
+    from playwright.sync_api import sync_playwright
+    ONLINE_BOT_AVAILABLE = True
+except ImportError:
+    ONLINE_BOT_AVAILABLE = False
+
 
 def resource_path(relative_path):
     try:
@@ -22,22 +48,16 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 # Load models
-model_path = resource_path("resemblyzer/pretrained.pt")
+model_path = resource_path("resemblyzer_model/pretrained.pt")
 if not os.path.exists(model_path):
     print("\nError: Pretrained model file not found!")
-    print(f"Expected path: {model_path}")
-    print("\nSteps to fix:")
-    print("1. Create a directory named 'resemblyzer' next to this script")
-    print("2. Download 'pretrained.pt' from: https://github.com/resemble-ai/Resemblyzer")
-    print("3. Place it in the 'resemblyzer' folder")
     sys.exit(1)
 
 encoder = VoiceEncoder(device="cpu")
 
 # Constants
 SAMPLE_RATE = 16000
-SIMILARITY_THRESHOLD = 0.8
-
+SIMILARITY_THRESHOLD = 0.7
 AZURE_AI_ENDPOINT = "https://models.github.ai/inference"
 AZURE_AI_MODEL = "openai/gpt-4.1"
 
@@ -46,154 +66,108 @@ models = {
     "Hindi": WhisperModel("small", device="cpu", compute_type="float32"),
     "Gujarati": WhisperModel("small", device="cpu", compute_type="float32")
 }
-
-language_map = {
-    "English": None,
-    "Hindi": "hi",
-    "Gujarati": "gu"
-}
+language_map = {"English": None, "Hindi": "hi", "Gujarati": "gu"}
 
 hindi_normalizer = indic_normalize.IndicNormalizerFactory().get_normalizer("hi")
 gujarati_normalizer = indic_normalize.IndicNormalizerFactory().get_normalizer("gu")
 HINDI_CHAR_RANGE = r'[\u0900-\u097F]'
 GUJARATI_CHAR_RANGE = r'[\u0A80-\u0AFF]'
 
-# Global speaker state
 speaker_embeddings = []
 speaker_labels = []
 speaker_counter = 1
 
-def is_hindi_text(text: str) -> bool:
-    return bool(re.search(HINDI_CHAR_RANGE, text))
+def is_hindi_text(text: str) -> bool: return bool(re.search(HINDI_CHAR_RANGE, text))
+def is_gujarati_text(text: str) -> bool: return bool(re.search(GUJARATI_CHAR_RANGE, text))
 
-def is_gujarati_text(text: str) -> bool:
-    return bool(re.search(GUJARATI_CHAR_RANGE, text))
-
-def normalize_hindi_text(text: str) -> str:
-    normalized_text = hindi_normalizer.normalize(text)
-    hindi_chars = re.findall(HINDI_CHAR_RANGE, normalized_text)
-    filtered_text = ''.join(hindi_chars)
-    tokens = indic_tokenize.trivial_tokenize(filtered_text)
+def normalize_text(text: str, language: str) -> str:
+    if language == "Hindi":
+        normalized = hindi_normalizer.normalize(text)
+        chars = ''.join(re.findall(HINDI_CHAR_RANGE, normalized))
+    else:
+        normalized = gujarati_normalizer.normalize(text)
+        chars = ''.join(re.findall(GUJARATI_CHAR_RANGE, normalized))
+    tokens = indic_tokenize.trivial_tokenize(chars)
     return " ".join(tokens)
 
-def normalize_gujarati_text(text: str) -> str:
-    normalized_text = gujarati_normalizer.normalize(text)
-    gujarati_chars = re.findall(GUJARATI_CHAR_RANGE, normalized_text)
-    filtered_text = ''.join(gujarati_chars)
-    tokens = indic_tokenize.trivial_tokenize(filtered_text)
-    return " ".join(tokens)
-
-def get_summary(text: str, language: str = "English") -> str:
+def get_summary(text: str, language: str = "English", participants=None) -> str:
     try:
         token = os.environ.get("GITHUB_TOKEN", "")
         if not token:
-            return "Error: GITHUB_TOKEN environment variable not set."
+            return "Error: GITHUB_TOKEN environment variable not set in .env."
 
-        client = ChatCompletionsClient(
-            endpoint=AZURE_AI_ENDPOINT,
-            credential=AzureKeyCredential(token),
-        )
+        client = ChatCompletionsClient(endpoint=AZURE_AI_ENDPOINT, credential=AzureKeyCredential(token))
 
-        if language == "Hindi":
-            user_message_content = f"""निम्नलिखित हिंदी टेक्स्ट का सारांश हिंदी में लिखें:\n{text}"""
-        elif language == "Gujarati":
-            user_message_content = f"""નીચેના ગુજરાતી ટેક્સ્ટનો સારાંશ ગુજરાતીમાં લખો:\n{text}"""
-        else:
-            user_message_content = f"""Summarize the following text:\n{text}"""
+        extra_context = f"\nList of Participants detected: {', '.join(participants)}" if participants else ""
+        
+        user_msg = f"Summarize the following text:\n{text}{extra_context}"
+        if language == "Hindi": user_msg = f"निम्नलिखित हिंदी टेक्स्ट का सारांश हिंदी में लिखें:\n{text}{extra_context}"
+        elif language == "Gujarati": user_msg = f"નીચેના ગુજરાતી ટેક્સ્ટનો સારાંશ ગુજરાતીમાં લખો:\n{text}{extra_context}"
 
         messages = [
-            SystemMessage('''
-You are an expert meeting assistant. Analyze the following meeting transcript and provide a structured summary with:
-
+            SystemMessage('''You are an expert meeting assistant. Analyze the transcript and provide:
 - Meeting Summary
 - Agenda
 - Key Points and Decisions
 - Speakers and Roles
 - Action Items
-- Notable Quotes or Insights
-- Future Recommendations
-- Number of Unique Speakers
-
-Use bullet points or clear headings where appropriate.
-'''),
-            UserMessage(user_message_content)
+- Number of Unique Speakers'''),
+            UserMessage(user_msg)
         ]
-
-        response = client.complete(
-            messages=messages,
-            temperature=0.7,
-            top_p=1,
-            model=AZURE_AI_MODEL
-        )
-
-        if response.choices and response.choices[0].message and response.choices[0].message.content:
-            return response.choices[0].message.content.strip()
-        else:
-            return "Error: Could not retrieve summary from Azure AI."
+        response = client.complete(messages=messages, temperature=0.7, top_p=1, model=AZURE_AI_MODEL)
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"Error connecting to Azure AI Inference: {str(e)}"
+        return f"Error connecting to Azure AI: {str(e)}"
 
 def speaker_id(new_embed):
     global speaker_embeddings, speaker_labels, speaker_counter
-
     if not speaker_embeddings:
         speaker_embeddings.append(new_embed)
-        speaker_labels.append(f"Speaker {speaker_counter}")
-        return f"Speaker {speaker_counter}"
-
+        speaker_labels.append(f"Speaker 1")
+        return "Speaker 1"
     similarities = [np.dot(embed, new_embed) for embed in speaker_embeddings]
     max_sim = max(similarities)
-
     if max_sim > SIMILARITY_THRESHOLD:
-        idx = similarities.index(max_sim)
-        return speaker_labels[idx]
-    else:
-        speaker_counter += 1
-        new_label = f"Speaker {speaker_counter}"
-        speaker_embeddings.append(new_embed)
-        speaker_labels.append(new_label)
-        return new_label
+        return speaker_labels[similarities.index(max_sim)]
+    
+    speaker_counter += 1
+    new_label = f"Speaker {speaker_counter}"
+    speaker_embeddings.append(new_embed)
+    speaker_labels.append(new_label)
+    return new_label
 
-def record_and_transcribe(minutes: float, title: str = "", language: str = "English"):
+def process_audio_file(wav_path: str, title: str, language: str, participants: list = None):
+    """Core translation pipeline separated from recording mechanism."""
     global speaker_embeddings, speaker_labels, speaker_counter
-    speaker_embeddings = []
-    speaker_labels = []
-    speaker_counter = 1
+    speaker_embeddings, speaker_labels, speaker_counter = [], [], 1
+    
+    # Read audio for segmentation processing
+    samplerate, audio_data = wavfile.read(wav_path)
+    
+    # Convert to mono float32 for processing
+    if len(audio_data.shape) > 1: audio_data = audio_data.mean(axis=1)
+    if audio_data.dtype == np.int16: audio_data = audio_data.astype(np.float32) / 32768.0
 
-    duration = int(minutes * 60)
-    print(f"Recording for {minutes:.2f} minutes...")
-    audio = sd.rec(int(SAMPLE_RATE * duration), samplerate=SAMPLE_RATE, channels=1)
-    sd.wait()
-    print("Recording complete.")
-
-    wav_path = "temp_chunk.wav"
-    write(wav_path, SAMPLE_RATE, (audio * 32767).astype(np.int16))
-
-    if not np.any(audio):
-        print("No audio detected.")
-        return "Silent audio detected.", "No summary available.", None
+    if not np.any(audio_data): return "Silent audio detected.", "No summary available.", None
 
     try:
         print(f"Transcribing with {language} model...")
         model = models[language]
-        lang_code = language_map.get(language)
-        segments, _ = model.transcribe(wav_path, language=lang_code)
-        os.remove(wav_path)
-
+        segments, _ = model.transcribe(wav_path, language=language_map.get(language))
+        
         filename = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + (title.replace(" ", "_") or "Untitled")
         full_text = ""
 
         print("Processing segments for speaker detection...")
         for seg in segments:
-            start = int(seg.start * SAMPLE_RATE)
-            end = int(seg.end * SAMPLE_RATE)
-            segment_audio = audio[start:end].flatten()
+            start_idx = int(seg.start * samplerate)
+            end_idx = int(seg.end * samplerate)
+            segment_audio = audio_data[start_idx:end_idx].flatten()
 
-            if len(segment_audio) < SAMPLE_RATE // 4:
-                continue
+            if len(segment_audio) < samplerate // 4: continue
 
             try:
-                wav_seg = preprocess_wav(segment_audio, SAMPLE_RATE)
+                wav_seg = preprocess_wav(segment_audio, samplerate)
                 embed = encoder.embed_utterance(wav_seg)
                 speaker = speaker_id(embed)
             except:
@@ -202,51 +176,200 @@ def record_and_transcribe(minutes: float, title: str = "", language: str = "Engl
             start_ts = datetime.utcfromtimestamp(seg.start).strftime("%H:%M:%S")
             end_ts = datetime.utcfromtimestamp(seg.end).strftime("%H:%M:%S")
             text = seg.text.strip()
-            if language == "Hindi" and is_hindi_text(text):
-                text = normalize_hindi_text(text)
-            elif language == "Gujarati" and is_gujarati_text(text):
-                text = normalize_gujarati_text(text)
+            
+            if language in ["Hindi", "Gujarati"]:
+                text = normalize_text(text, language)
+            
             full_text += f"[{start_ts} - {end_ts}] {speaker}: {text}\n"
 
-        print("Generating summary...")
-        summary = get_summary(full_text, language)
+        print("Generating AI Summary...")
+        summary = get_summary(full_text, language, participants)
 
         output_filename = f"{filename}.txt"
         with open(output_filename, "w", encoding="utf-8") as f:
             f.write(f"=== {filename} ===\n\n")
-            f.write("=== TRANSCRIPT ===\n\n")
-            f.write(full_text)
-            f.write("\n\n=== SUMMARY ===\n\n")
-            f.write(summary)
-
-        print(f"Transcript saved to: {output_filename}")
+            if participants: f.write(f"=== PARTICIPANTS ===\n{', '.join(participants)}\n\n")
+            f.write("=== TRANSCRIPT ===\n\n" + full_text)
+            f.write("\n\n=== SUMMARY ===\n\n" + summary)
+        
         return full_text, summary, output_filename
-
     except Exception as e:
-        print(f"Error during transcription: {str(e)}")
-        return f"Error during transcription: {str(e)}", "Error getting summary", None
+        print(f"Transcription error: {str(e)}")
+        return str(e), "", None
+
+def record_local(minutes: float, title: str, language: str):
+    """Workflow 1: Local Microphone Capture"""
+    duration = int(minutes * 60)
+    print(f"Recording from local microphone for {minutes:.2f} minutes...")
+    audio = sd.rec(int(SAMPLE_RATE * duration), samplerate=SAMPLE_RATE, channels=1)
+    sd.wait()
+    print("Recording complete.")
+
+    wav_path = "temp_local.wav"
+    wavfile.write(wav_path, SAMPLE_RATE, (audio * 32767).astype(np.int16))
+    
+    res = process_audio_file(wav_path, title, language)
+    if os.path.exists(wav_path): os.remove(wav_path)
+    return res
+
+def join_meeting_and_record(url: str, title: str, language: str):
+    """Workflow 2: Online Bot Capture (Playwright + WASAPI Loopback)"""
+    if not ONLINE_BOT_AVAILABLE:
+        print("Missing dependencies. Run: pip install playwright pyaudiowpatch")
+        print("Then run: python -m playwright install chromium")
+        return "", "", None
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+
+    wav_path = "temp_meeting.wav"
+    stop_recording = False
+    participants = set()
+
+    with pyaudio.PyAudio() as p:
+        try:
+            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+            
+            # Find loopback
+            if not default_speakers["isLoopbackDevice"]:
+                for loopback in p.get_loopback_device_info_generator():
+                    if default_speakers["name"] in loopback["name"]:
+                        default_speakers = loopback
+                        break
+        except Exception as e:
+            print(f"Audio device error: {e}. Check pyaudiowpatch installation.")
+            return "", "", None
+
+        wf = wave.open(wav_path, 'wb')
+        wf.setnchannels(default_speakers["maxInputChannels"])
+        wf.setsampwidth(pyaudio.get_sample_size(pyaudio.paInt16))
+        wf.setframerate(int(default_speakers["defaultSampleRate"]))
+
+        def audio_callback(in_data, frame_count, time_info, status):
+            if not stop_recording: wf.writeframes(in_data)
+            return (in_data, pyaudio.paContinue)
+
+        stream = p.open(format=pyaudio.paInt16,
+                        channels=default_speakers["maxInputChannels"],
+                        rate=int(default_speakers["defaultSampleRate"]),
+                        frames_per_buffer=512,
+                        input=True,
+                        input_device_index=default_speakers["index"],
+                        stream_callback=audio_callback)
+
+        print(f"\n[BOT] Opening meeting: {url}")
+        with sync_playwright() as pw:
+            user_data_path = os.path.join(os.getcwd(), "bot_profile")
+
+            context = pw.chromium.launch_persistent_context(
+                user_data_dir=user_data_path,
+                channel="chrome",
+                headless=False,
+                args=[
+                    '--use-fake-ui-for-media-stream', 
+                    '--disable-blink-features=AutomationControlled',
+                    '--profile-directory=Default',
+                    '--disable-guest-mode'
+                ],
+                ignore_default_args=["--enable-automation"],
+                permissions=['camera', 'microphone']
+            )
+            page = context.pages[0]
+            
+            print("\n[BOT] Checking authentication status...")
+            page.goto("https://accounts.google.com/")
+            page.wait_for_timeout(3000)
+            
+            # The most foolproof check: If the email input box exists, we are NOT logged in!
+            if page.locator('input[type="email"]').is_visible():
+                print("\n[BOT] ⚠️ You are not logged in! Google's security blocks robots from typing passwords.")
+                print("[BOT] 👉 PLEASE LOG IN MANUALLY right now in the Chrome window that just opened.")
+                print("[BOT] 👉 YOU ONLY HAVE TO DO THIS ONCE! The cookies will be saved forever.")
+                input("\n[BOT] >>> ONCE YOU ARE FULLY LOGGED IN, PRESS ENTER HERE TO CONTINUE <<<")
+            else:
+                print("\n[BOT] ✅ Profile is already authenticated. Skipping login!")
+            stream.start_stream()
+            print("[BOT] Audio recording started (System Volume Loopback active)")
+
+            page.goto(url)
+            
+            try:
+                page.wait_for_timeout(3000)
+                # Attempt to disable mic/cam
+                page.keyboard.press('Control+d')
+                page.keyboard.press('Control+e')
+                
+                try: page.fill('input[placeholder="Your name"]', "Smart Notes Bot", timeout=2000)
+                except: pass
+
+                try: page.click('span:has-text("Ask to join")', timeout=2000)
+                except: page.click('span:has-text("Join now")', timeout=2000)
+                    
+                print("[BOT] Interaction completed. Hanging out in meeting...")
+            except Exception as e:
+                print(f"[BOT] Automated join buttons not found. You might need to click 'Join' manually in the browser. Error: {e}")
+
+            print("\n>>> TYPE 'q' AND PRESS ENTER HERE AT ANY TIME TO END THE RECORDING <<<\n")
+
+            # Simple Background Input Listener to stop manually
+            def check_quit():
+                while not stop_recording:
+                    if input().strip().lower() == 'q':
+                        return
+            threading.Thread(target=check_quit, daemon=True).start()
+
+            # Poll for participants while recording
+            while not stop_recording:
+                try:
+                    # Google Meet participants class '.zWGUib'. Highly brittle, varies over time!
+                    names = page.locator('.zWGUib').all_inner_texts()
+                    for n in names: participants.add(n)
+                except:
+                    pass
+                
+                # Auto-stop if 'You left the meeting' screen occurs
+                try:
+                    if page.locator('text=You left the meeting').is_visible(timeout=500):
+                        print("[BOT] Meeting ended naturally.")
+                        break
+                except: pass
+                
+                time.sleep(2)
+
+            stop_recording = True
+            stream.stop_stream()
+            stream.close()
+            wf.close()
+            context.close()
+
+    print("[BOT] Extraction finished.")
+    res = process_audio_file(wav_path, title, language, list(participants))
+    if os.path.exists(wav_path): os.remove(wav_path)
+    return res
 
 def main():
     print("=== Audio Transcription System ===")
+    print("1. Local Microphone Capture")
+    print("2. Online Meeting Bot (Google Meet via Loopback)")
+    
+    choice = input("Select mode (1/2): ").strip()
     title = input("Enter conversation title (press Enter for 'Untitled'): ").strip()
-    while True:
-        try:
-            minutes = float(input("Enter recording duration in minutes (minimum 0.1): "))
-            if minutes >= 0.1:
-                break
-            print("Too short.")
-        except ValueError:
-            print("Invalid input.")
-
     language = input("Select language (English/Hindi/Gujarati) [default: English]: ").strip().capitalize()
-    if language not in models:
-        language = "English"
+    if language not in models: language = "English"
 
-    transcript, summary, filename = record_and_transcribe(minutes, title, language)
-    print("\n=== Transcription ===")
-    print(transcript)
-    print("\n=== Summary ===")
-    print(summary)
+    if choice == "2":
+        url = input("Enter Google Meet URL: ").strip()
+        transcript, summary, filename = join_meeting_and_record(url, title, language)
+    else:
+        while True:
+            try:
+                minutes = float(input("Enter recording duration in minutes (minimum 0.1): "))
+                if minutes >= 0.1: break
+            except ValueError: pass
+        transcript, summary, filename = record_local(minutes, title, language)
+        
+    print(f"\nOutput saved to {filename}")
 
 if __name__ == "__main__":
     main()
