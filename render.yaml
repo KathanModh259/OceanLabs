@@ -39,8 +39,9 @@ services:
       - key: NOTION_OAUTH_REDIRECT_URI
         sync: false
 
-  - type: static
+  - type: web
     name: oceanlabs-web
+    runtime: static
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
