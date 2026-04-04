@@ -11,7 +11,7 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: FRONTEND_ORIGINS
-        value: https://oceanlabs-web.onrender.com
+        value: https://oceanlabs-web-1281.onrender.com,https://oceanlabs-web.onrender.com
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -40,7 +40,7 @@ services:
         value: https://oceanlabs-api-1281.onrender.com/api/integrations/oauth/notion/callback
 
   - type: web
-    name: oceanlabs-web
+    name: oceanlabs-web-1281
     runtime: static
     rootDir: frontend
     buildCommand: npm ci && npm run build
