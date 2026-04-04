@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: oceanlabs-api
+    runtime: docker
+    dockerContext: .
+    dockerfilePath: ./backend/Dockerfile
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: FRONTEND_ORIGINS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: BACKEND_PUBLIC_BASE_URL
+        sync: false
+      - key: SLACK_OAUTH_CLIENT_ID
+        sync: false
+      - key: SLACK_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: SLACK_OAUTH_REDIRECT_URI
+        sync: false
+      - key: JIRA_OAUTH_CLIENT_ID
+        sync: false
+      - key: JIRA_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: JIRA_OAUTH_REDIRECT_URI
+        sync: false
+      - key: NOTION_OAUTH_CLIENT_ID
+        sync: false
+      - key: NOTION_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: NOTION_OAUTH_REDIRECT_URI
+        sync: false
+
+  - type: static
+    name: oceanlabs-web
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: VITE_API_BASE_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
