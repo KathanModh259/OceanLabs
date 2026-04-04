@@ -1,0 +1,13 @@
+# Replace app.example.com with your production domain
+app.example.com {
+    encode gzip zstd
+
+    # Backend API (includes websocket stream endpoint)
+    @api path /api/* /docs /openapi.json
+    reverse_proxy @api 127.0.0.1:8000
+
+    # Frontend static build
+    root * D:\\OceanLabs\\Language\\frontend\\dist
+    try_files {path} /index.html
+    file_server
+}

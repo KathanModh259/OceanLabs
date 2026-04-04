@@ -31,6 +31,7 @@ import wave
 import time
 import threading
 import asyncio
+from urllib.parse import urlparse
 
 # Azure & Dotenv
 from azure.ai.inference import ChatCompletionsClient
@@ -58,10 +59,167 @@ except ImportError as import_error:
 # Optional dependencies for Online Bot Mode
 try:
     import pyaudiowpatch as pyaudio
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
     ONLINE_BOT_AVAILABLE = True
 except ImportError:
     ONLINE_BOT_AVAILABLE = False
+    PlaywrightTimeoutError = TimeoutError
+
+try:
+    from integrations import run_post_meeting_integrations
+except Exception as integration_import_error:  # noqa: BLE001
+    run_post_meeting_integrations = None
+    print(f"[Integrations Warning] Integrations module unavailable: {integration_import_error}")
+
+
+PLATFORM_ALIASES = {
+    "google meet": "meet",
+    "google_meet": "meet",
+    "gmeet": "meet",
+    "meet": "meet",
+    "microsoft teams": "teams",
+    "microsoft_teams": "teams",
+    "ms teams": "teams",
+    "ms_teams": "teams",
+    "teams": "teams",
+    "zoom": "zoom",
+    "zoom meeting": "zoom",
+    "zoom_meeting": "zoom",
+    "local": "local",
+    "offline": "local",
+}
+
+PLATFORM_HOST_RULES = {
+    "meet": ["meet.google.com"],
+    "teams": ["teams.microsoft.com", "teams.live.com", "teams.cloud.microsoft"],
+    "zoom": ["zoom.us", "zoomgov.com", "zoom.com.cn"],
+}
+
+
+def normalize_platform_name(platform: str) -> str:
+    key = (platform or "").strip().lower()
+    return PLATFORM_ALIASES.get(key, key)
+
+
+def detect_platform_from_url(url: str) -> str:
+    candidate = (url or "").strip()
+    if not candidate:
+        return "meet"
+
+    if not candidate.lower().startswith(("http://", "https://")):
+        candidate = f"https://{candidate}"
+
+    try:
+        host = (urlparse(candidate).hostname or "").lower()
+    except Exception:
+        host = ""
+
+    for platform, domains in PLATFORM_HOST_RULES.items():
+        if any(host == domain or host.endswith(f".{domain}") for domain in domains):
+            return platform
+
+    return "meet"
+
+
+def normalize_person_name(raw_name: str) -> str | None:
+    candidate = (raw_name or "").replace("\n", " ").strip()
+    candidate = re.sub(r"\s{2,}", " ", candidate)
+    candidate = re.sub(r"[:\-|\u2013\u2014\s]+$", "", candidate).strip()
+    if not candidate:
+        return None
+
+    lowered = candidate.lower()
+    blocked_fragments = (
+        "meeting chat",
+        "caption",
+        "microphone",
+        "unmuted",
+        "muted",
+        "video off",
+        "controls",
+        "more options",
+        "raise hand",
+        "participants",
+    )
+    if any(fragment in lowered for fragment in blocked_fragments):
+        return None
+
+    if lowered in {"you", "you (you)"}:
+        return "Meeting Host"
+
+    if len(candidate) < 2 or len(candidate) > 60:
+        return None
+
+    return candidate
+
+
+def click_first_visible(page, selectors: list[str], timeout: int = 2500) -> bool:
+    for selector in selectors:
+        try:
+            page.locator(selector).first.click(timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def fill_first_visible(page, selectors: list[str], value: str, timeout: int = 2500) -> bool:
+    for selector in selectors:
+        try:
+            page.locator(selector).first.fill(value, timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def hosts_compatible(expected_host: str, current_host: str) -> bool:
+    if not expected_host or not current_host:
+        return False
+    if expected_host == current_host:
+        return True
+    return current_host.endswith(f".{expected_host}") or expected_host.endswith(f".{current_host}")
+
+
+def navigate_with_fallback(page, target_url: str, label: str, timeout_ms: int = 45000):
+    expected_host = ""
+    try:
+        expected_host = (urlparse(target_url).hostname or "").lower()
+    except Exception:
+        expected_host = ""
+
+    last_error = None
+    for wait_mode in ("domcontentloaded", "commit", "load"):
+        try:
+            print(f"[BOT] Navigating to {label} (wait mode: {wait_mode})")
+            page.goto(target_url, wait_until=wait_mode, timeout=timeout_ms)
+            return
+        except PlaywrightTimeoutError as exc:
+            last_error = exc
+            print(f"[BOT] Navigation timeout for {label} with wait mode '{wait_mode}'.")
+        except Exception as exc:
+            last_error = exc
+            print(f"[BOT] Navigation warning for {label}: {exc}")
+            break
+
+        try:
+            page.wait_for_timeout(1200)
+            current_host = (urlparse(page.url).hostname or "").lower()
+            if hosts_compatible(expected_host, current_host):
+                print(f"[BOT] Continuing after timeout because host resolved to {current_host}.")
+                return
+        except Exception:
+            pass
+
+    current_url = "unknown"
+    try:
+        current_url = page.url
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        f"Could not open {label}. Last navigation error: {last_error}. Current URL: {current_url}"
+    )
 
 
 # ==================== Platform Strategy Pattern ====================
@@ -85,9 +243,25 @@ class PlatformStrategy:
         """Extract active speaker name from DOM. Return None if not found."""
         raise NotImplementedError
 
+    def get_latest_caption(self, page):
+        """Extract latest caption snippet. Return dict with speaker/text or None."""
+        return None
+
     def get_meeting_ended_selector(self):
         """Return text that indicates meeting ended."""
         return "You left the meeting"
+
+    def get_meeting_end_indicators(self):
+        return [self.get_meeting_ended_selector()]
+
+    def has_meeting_ended(self, page) -> bool:
+        try:
+            for indicator in self.get_meeting_end_indicators():
+                if page.locator(f'text={indicator}').first.is_visible(timeout=250):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def get_platform_name(self):
         raise NotImplementedError
@@ -139,16 +313,63 @@ class GoogleMeetStrategy(PlatformStrategy):
             }
             return "";
         }''')
-        if active_label:
-            cleaned_name = active_label.split('\\n')[0].strip()
-            if "You" in cleaned_name or "you" in cleaned_name:
-                cleaned_name = "Meeting Host"
-            if len(cleaned_name) > 1 and len(cleaned_name) < 25:
-                return cleaned_name.title()
-        return None
+        return normalize_person_name(active_label.split('\\n')[0] if active_label else "")
+
+    def get_latest_caption(self, page):
+        payload = page.evaluate('''() => {
+            const speakerSelectors = [
+                '.zs7s8d',
+                '.abjB1e',
+                '[data-self-name]'
+            ];
+            const textSelectors = [
+                '.iTTPOb',
+                '.a4cQT',
+                '.bh44bd',
+                '[jsname="YS01Ge"]',
+                '[class*="caption"] [class*="text"]'
+            ];
+
+            const latestTextNode = (() => {
+                for (const selector of textSelectors) {
+                    const nodes = Array.from(document.querySelectorAll(selector));
+                    for (let i = nodes.length - 1; i >= 0; i -= 1) {
+                        const value = (nodes[i]?.innerText || nodes[i]?.textContent || '').trim();
+                        if (value) return value;
+                    }
+                }
+                return '';
+            })();
+
+            const latestSpeakerNode = (() => {
+                for (const selector of speakerSelectors) {
+                    const nodes = Array.from(document.querySelectorAll(selector));
+                    for (let i = nodes.length - 1; i >= 0; i -= 1) {
+                        const value = (nodes[i]?.innerText || nodes[i]?.textContent || '').trim();
+                        if (value) return value;
+                    }
+                }
+                return '';
+            })();
+
+            if (!latestTextNode && !latestSpeakerNode) return null;
+            return { speaker: latestSpeakerNode, text: latestTextNode };
+        }''')
+
+        if not isinstance(payload, dict):
+            return None
+
+        speaker = normalize_person_name((payload.get("speaker") or "").strip())
+        text = re.sub(r"\s+", " ", (payload.get("text") or "").strip())
+        if not text:
+            return None
+        return {"speaker": speaker, "text": text}
 
     def get_meeting_ended_selector(self):
         return "You left the meeting"
+
+    def get_meeting_end_indicators(self):
+        return ["You left the meeting", "The meeting has ended", "Call ended"]
 
     def get_platform_name(self):
         return "Google Meet"
@@ -161,9 +382,11 @@ class TeamsStrategy(PlatformStrategy):
     def is_logged_in(self, page):
         # Simple check: if email input visible or sign-in text, not logged in
         try:
-            if page.locator('input[type="email"]').is_visible():
+            if page.locator('input[type="email"]').first.is_visible():
                 return False
-            if page.locator('text=Sign in').is_visible():
+            if page.locator('text=Sign in').first.is_visible():
+                return False
+            if page.locator('button:has-text("Use another account")').first.is_visible():
                 return False
             return True
         except:
@@ -177,45 +400,135 @@ class TeamsStrategy(PlatformStrategy):
             pass
 
     def get_join_actions(self, page, url, bot_name):
-        # Fill name if prompted
-        try:
-            page.fill('input[name="name"]', bot_name, timeout=2000)
-        except:
-            try:
-                page.fill('input[placeholder="Enter your name"]', bot_name, timeout=2000)
-            except:
-                pass
-        # Click join buttons
-        try:
-            page.click('button:has-text("Join now")', timeout=3000)
-        except:
-            try:
-                page.click('button:has-text("Continue")', timeout=3000)
-            except:
-                pass
+        click_first_visible(
+            page,
+            [
+                'button:has-text("Continue on this browser")',
+                'a:has-text("Continue on this browser")',
+                'button:has-text("Join on the web instead")',
+                'a:has-text("Join on the web instead")',
+            ],
+            timeout=4000,
+        )
+
+        click_first_visible(
+            page,
+            [
+                'button[aria-label*="Microphone" i]',
+                'button[aria-label*="mute" i]',
+                'button[data-tid*="toggle-mute"]',
+            ],
+            timeout=2000,
+        )
+        click_first_visible(
+            page,
+            [
+                'button[aria-label*="Camera" i]',
+                'button[aria-label*="video" i]',
+                'button[data-tid*="toggle-video"]',
+            ],
+            timeout=2000,
+        )
+
+        fill_first_visible(
+            page,
+            [
+                'input[name="name"]',
+                'input[placeholder*="name" i]',
+                'input[data-tid*="display-name"]',
+            ],
+            bot_name,
+            timeout=2500,
+        )
+
+        click_first_visible(
+            page,
+            [
+                'button:has-text("Join now")',
+                'button:has-text("Join")',
+                'button:has-text("Continue")',
+                'button[data-tid*="prejoin-join-button"]',
+            ],
+            timeout=4000,
+        )
 
     def get_active_speaker(self, page):
         active_name = page.evaluate('''() => {
-            // Look for active speaker indicator
-            let activeIndicator = document.querySelector('[data-tid*="active-speaker"], [data-tid*="speaker"], .active-speaker, [aria-selected="true"]');
-            if (activeIndicator) {
-                let container = activeIndicator.closest('[data-tid*="participant-"]');
-                if (container) {
-                    let nameEl = container.querySelector('[data-tid*="name"], .name, .participant-name, [aria-label*="name"]');
-                    if (nameEl) return nameEl.innerText.trim();
+            const directSelectors = [
+                '[data-tid="active-speaker-name"]',
+                '[data-tid*="active-speaker"] [data-tid*="display-name"]',
+                '.subtitle-speaker-name',
+                '.caption-text-speaker',
+                '.ts-live-transcription-speaker'
+            ];
+            for (const selector of directSelectors) {
+                const el = document.querySelector(selector);
+                if (el && el.innerText) return el.innerText.trim();
+            }
+
+            const ariaSpeaking = document.querySelector('[aria-label*=" is speaking" i], [aria-label*=" is talking" i]');
+            if (ariaSpeaking) {
+                const label = (ariaSpeaking.getAttribute('aria-label') || '').trim();
+                if (label) {
+                    return label
+                        .replace(/ is speaking.*/i, '')
+                        .replace(/ is talking.*/i, '')
+                        .trim();
                 }
             }
-            // Fallback: live subtitles
-            let subtitleEl = document.querySelector('.live-subtitles .subtitleSpeakerName, .subtitle-speaker-name, .caption-text-speaker');
-            if (subtitleEl) return subtitleEl.innerText.trim();
+
             return "";
         }''')
-        if active_name and len(active_name) > 1:
-            return active_name.title()
-        return None
+        return normalize_person_name(active_name)
 
-    def get_meeting_ended_selector(self):
-        return "You have been removed"
+    def get_latest_caption(self, page):
+        payload = page.evaluate('''() => {
+            const speakerSelectors = [
+                '.caption-text-speaker',
+                '.ts-live-transcription-speaker',
+                '[data-tid*="closed-caption-speaker"]',
+                '[data-tid*="transcription-speaker"]'
+            ];
+            const textSelectors = [
+                '.caption-text-line',
+                '.ts-live-transcription-text',
+                '[data-tid*="closed-caption-text"]',
+                '[data-tid*="transcription-text"]'
+            ];
+
+            const pickLatest = (selectors) => {
+                for (const selector of selectors) {
+                    const nodes = Array.from(document.querySelectorAll(selector));
+                    for (let i = nodes.length - 1; i >= 0; i -= 1) {
+                        const value = (nodes[i]?.innerText || nodes[i]?.textContent || '').trim();
+                        if (value) return value;
+                    }
+                }
+                return '';
+            };
+
+            const speaker = pickLatest(speakerSelectors);
+            const text = pickLatest(textSelectors);
+            if (!speaker && !text) return null;
+            return { speaker, text };
+        }''')
+
+        if not isinstance(payload, dict):
+            return None
+
+        speaker = normalize_person_name((payload.get("speaker") or "").strip())
+        text = re.sub(r"\s+", " ", (payload.get("text") or "").strip())
+        if not text:
+            return None
+        return {"speaker": speaker, "text": text}
+
+    def get_meeting_end_indicators(self):
+        return [
+            "You have been removed",
+            "You left the meeting",
+            "The meeting has ended",
+            "This meeting has ended",
+        ]
 
     def get_platform_name(self):
         return "Microsoft Teams"
@@ -236,52 +549,181 @@ class ZoomStrategy(PlatformStrategy):
             pass
 
     def get_join_actions(self, page, url, bot_name):
-        # Click "Join from Your Browser" if present
-        try:
-            page.click('a:has-text("Join from Your Browser")', timeout=5000)
-        except:
-            pass
-        # Fill name
-        try:
-            page.fill('input[name="name"]', bot_name, timeout=2000)
-        except:
-            try:
-                page.fill('input[placeholder="Enter your name"]', bot_name, timeout=2000)
-            except:
-                pass
-        # Click Join button
-        try:
-            page.click('button:has-text("Join")', timeout=3000)
-        except:
-            pass
+        click_first_visible(
+            page,
+            [
+                'a:has-text("Launch Meeting")',
+                'button:has-text("Launch Meeting")',
+            ],
+            timeout=2500,
+        )
+
+        click_first_visible(
+            page,
+            [
+                'a:has-text("Join from Your Browser")',
+                'button:has-text("Join from Your Browser")',
+                'a:has-text("join from your browser")',
+            ],
+            timeout=6000,
+        )
+
+        fill_first_visible(
+            page,
+            [
+                'input[name="name"]',
+                'input#input-for-name',
+                'input[placeholder*="name" i]',
+            ],
+            bot_name,
+            timeout=2500,
+        )
+
+        click_first_visible(
+            page,
+            [
+                'button:has-text("Join")',
+                'button:has-text("Join Meeting")',
+                'button:has-text("Continue")',
+            ],
+            timeout=4000,
+        )
 
     def get_active_speaker(self, page):
         active_name = page.evaluate('''() => {
-            let activeVideo = document.querySelector('[aria-selected="true"], .active-speaker, .video-holder.active');
-            if (activeVideo) {
-                let nameEl = activeVideo.querySelector('.name-text, .participant-name, [aria-label*="name"], .caption-text-speaker');
-                if (nameEl) return nameEl.innerText.trim();
+            const ariaSpeaking = document.querySelector('[aria-label*=" is talking" i], [aria-label*=" is speaking" i]');
+            if (ariaSpeaking) {
+                const label = (ariaSpeaking.getAttribute('aria-label') || '').trim();
+                if (label) {
+                    return label
+                        .replace(/ is talking.*/i, '')
+                        .replace(/ is speaking.*/i, '')
+                        .trim();
+                }
             }
+
+            const captionSelectors = [
+                '.caption-speaker-name',
+                '.caption-text-speaker',
+                '[data-speaker-name]',
+                '[aria-live="polite"] .speaker-name',
+                '[aria-live="polite"] [class*="speaker"]'
+            ];
+            for (const selector of captionSelectors) {
+                const nodes = Array.from(document.querySelectorAll(selector));
+                if (nodes.length > 0) {
+                    const latest = nodes[nodes.length - 1];
+                    const text = (latest?.innerText || latest?.textContent || '').trim();
+                    if (text) return text;
+                }
+            }
+
+            const activeVideo = document.querySelector('[aria-selected="true"], .active-speaker, .video-holder.active');
+            if (activeVideo) {
+                const nameEl = activeVideo.querySelector('.name-text, .participant-name, [aria-label*="name"], .caption-text-speaker, .caption-speaker-name');
+                if (nameEl && nameEl.innerText) return nameEl.innerText.trim();
+            }
+
             return "";
         }''')
-        if active_name and len(active_name) > 1:
-            return active_name.title()
-        return None
+        return normalize_person_name(active_name)
 
-    def get_meeting_ended_selector(self):
-        return "You have been removed from the meeting"
+    def get_latest_caption(self, page):
+        payload = page.evaluate('''() => {
+            const speakerSelectors = [
+                '.caption-speaker-name',
+                '.caption-text-speaker',
+                '[data-speaker-name]',
+                '[aria-live="polite"] [class*="speaker"]'
+            ];
+            const textSelectors = [
+                '.caption-line-text',
+                '.caption-text',
+                '[aria-live="polite"] [class*="caption"] [class*="text"]',
+                '[aria-live="polite"] [class*="line"]'
+            ];
+
+            const pickLatest = (selectors) => {
+                for (const selector of selectors) {
+                    const nodes = Array.from(document.querySelectorAll(selector));
+                    for (let i = nodes.length - 1; i >= 0; i -= 1) {
+                        const value = (nodes[i]?.innerText || nodes[i]?.textContent || '').trim();
+                        if (value) return value;
+                    }
+                }
+                return '';
+            };
+
+            const speaker = pickLatest(speakerSelectors);
+            const text = pickLatest(textSelectors);
+            if (!speaker && !text) return null;
+            return { speaker, text };
+        }''')
+
+        if not isinstance(payload, dict):
+            return None
+
+        speaker = normalize_person_name((payload.get("speaker") or "").strip())
+        text = re.sub(r"\s+", " ", (payload.get("text") or "").strip())
+        if not text:
+            return None
+        return {"speaker": speaker, "text": text}
+
+    def get_meeting_end_indicators(self):
+        return [
+            "You have been removed from the meeting",
+            "This meeting has ended",
+            "Meeting has ended",
+            "The host has ended this meeting",
+            "The host has ended the meeting",
+            "You have left the meeting",
+            "This webinar has ended",
+            "Thanks for attending",
+        ]
+
+    def has_meeting_ended(self, page) -> bool:
+        if super().has_meeting_ended(page):
+            return True
+
+        try:
+            current_url = (page.url or "").lower()
+        except Exception:
+            current_url = ""
+
+        # Zoom often navigates to leave/end URLs when the session closes.
+        if any(token in current_url for token in ("/wc/leave", "/wc/end", "/ended", "/postattendee")):
+            return True
+
+        try:
+            return bool(page.evaluate('''() => {
+                const bodyText = (document.body?.innerText || "").toLowerCase();
+                const endMarkers = [
+                    "this meeting has ended",
+                    "meeting has ended",
+                    "the host has ended this meeting",
+                    "the host has ended the meeting",
+                    "you have left the meeting",
+                    "you have been removed from the meeting",
+                    "this webinar has ended",
+                    "thanks for attending"
+                ];
+                return endMarkers.some((marker) => bodyText.includes(marker));
+            }'''))
+        except Exception:
+            return False
 
     def get_platform_name(self):
         return "Zoom"
 
 
 def get_strategy(platform):
+    normalized_platform = normalize_platform_name(platform)
     strategies = {
         "meet": GoogleMeetStrategy(),
         "teams": TeamsStrategy(),
         "zoom": ZoomStrategy(),
     }
-    return strategies.get(platform, GoogleMeetStrategy())
+    return strategies.get(normalized_platform, GoogleMeetStrategy())
 
 
 def resource_path(relative_path):
@@ -304,6 +746,35 @@ SAMPLE_RATE = 16000
 SIMILARITY_THRESHOLD = 0.7
 AZURE_AI_ENDPOINT = "https://models.github.ai/inference"
 AZURE_AI_MODEL = "openai/gpt-4.1"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int((os.environ.get(name) or str(default)).strip())
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float((os.environ.get(name) or str(default)).strip())
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = (os.environ.get(name) or "").strip().lower()
+    if not raw_value:
+        return default
+    return raw_value in {"1", "true", "yes", "on"}
+
+
+ONLINE_MAX_DURATION_SECONDS = max(600, _env_int("ONLINE_MAX_DURATION_SECONDS", 10800))
+ONLINE_IDLE_STOP_SECONDS = max(60, _env_int("ONLINE_IDLE_STOP_SECONDS", 180))
+ONLINE_IDLE_MIN_RUNTIME_SECONDS = max(30, _env_int("ONLINE_IDLE_MIN_RUNTIME_SECONDS", 90))
+AUDIO_ACTIVITY_RMS_THRESHOLD = max(0.0005, _env_float("AUDIO_ACTIVITY_RMS_THRESHOLD", 0.003))
+PLAYWRIGHT_HEADLESS = _env_bool("PLAYWRIGHT_HEADLESS", False)
+PLAYWRIGHT_CHANNEL = (os.environ.get("PLAYWRIGHT_CHANNEL") or "chrome").strip()
 
 models = {
     "english": WhisperModel("base.en", device="cpu", compute_type="float32"),
@@ -335,9 +806,33 @@ gujarati_normalizer = indic_normalize.IndicNormalizerFactory().get_normalizer("g
 HINDI_CHAR_RANGE = r'[\u0900-\u097F]'
 GUJARATI_CHAR_RANGE = r'[\u0A80-\u0AFF]'
 
-speaker_embeddings = []
-speaker_labels = []
-speaker_counter = 1
+class SpeakerDiarizer:
+    """Per-recording speaker identification using voice embeddings.
+
+    This class maintains isolated state for a single recording session,
+    preventing cross-contamination between concurrent recordings.
+    """
+    def __init__(self):
+        self.embeddings = []
+        self.labels = []
+        self.counter = 1
+
+    def identify_speaker(self, new_embed) -> str:
+        """Identify or register a speaker based on voice embedding."""
+        if not self.embeddings:
+            self.embeddings.append(new_embed)
+            self.labels.append("Speaker 1")
+            return "Speaker 1"
+        similarities = [np.dot(embed, new_embed) for embed in self.embeddings]
+        max_sim = max(similarities)
+        if max_sim > SIMILARITY_THRESHOLD:
+            return self.labels[similarities.index(max_sim)]
+
+        self.counter += 1
+        new_label = f"Speaker {self.counter}"
+        self.embeddings.append(new_embed)
+        self.labels.append(new_label)
+        return new_label
 
 def is_hindi_text(text: str) -> bool: return bool(re.search(HINDI_CHAR_RANGE, text))
 def is_gujarati_text(text: str) -> bool: return bool(re.search(GUJARATI_CHAR_RANGE, text))
@@ -444,11 +939,20 @@ def speaker_id(new_embed):
     speaker_labels.append(new_label)
     return new_label
 
-def process_audio_file(wav_path: str, title: str, language: str, participants: list = None, dom_speaker_log: list = None, platform: str = "meet"):
+def process_audio_file(
+    wav_path: str,
+    title: str,
+    language: str,
+    participants: list = None,
+    dom_speaker_log: list = None,
+    platform: str = "meet",
+    requester_user_id: str = None,
+    diarizer: SpeakerDiarizer = None,  # Per-recording state
+):
     """Core translation pipeline separated from recording mechanism."""
-    global speaker_embeddings, speaker_labels, speaker_counter
-    speaker_embeddings, speaker_labels, speaker_counter = [], [], 1
-    
+    # Speaker diarizer is required unless DOM speaker log is provided (online bot)
+    # (no global state; diarizer instance is passed per recording)
+
     # Read audio for segmentation processing
     samplerate, audio_data = wavfile.read(wav_path)
     
@@ -471,34 +975,49 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
         
         meeting_db_id = None
         if supabase_client:
-            meeting_insert_payload = {
+            base_payload = {
                 "title": title or "Untitled Meeting",
                 "language": language_for_storage,
                 "status": "recording",
-                "platform": platform
+                "platform": platform,
             }
-            try:
-                print("[BOT] Syncing meeting to Supabase Database...")
-                res = supabase_client.table("meetings").insert(meeting_insert_payload).execute()
-                if res.data and len(res.data) > 0:
-                    meeting_db_id = res.data[0]['id']
-            except Exception as e:
-                error_text = str(e).lower()
-                if "platform" in error_text and "schema cache" in error_text:
-                    try:
-                        print("[Supabase Warning] 'platform' column missing. Retrying insert without platform field...")
-                        legacy_payload = {
-                            "title": meeting_insert_payload["title"],
-                            "language": meeting_insert_payload["language"],
-                            "status": meeting_insert_payload["status"],
-                        }
-                        res = supabase_client.table("meetings").insert(legacy_payload).execute()
-                        if res.data and len(res.data) > 0:
-                            meeting_db_id = res.data[0]['id']
-                    except Exception as fallback_error:
-                        print(f"[Supabase Error] Could not create meeting (legacy fallback failed): {fallback_error}")
-                else:
-                    print(f"[Supabase Error] Could not create meeting: {e}")
+
+            insert_variants = []
+            seen_payload_signatures = set()
+            owner_columns = [None]
+            if requester_user_id:
+                owner_columns = ["user_id", "created_by", "owner_id", None]
+
+            for owner_column in owner_columns:
+                payload_with_owner = dict(base_payload)
+                if owner_column:
+                    payload_with_owner[owner_column] = requester_user_id
+
+                for include_platform in (True, False):
+                    candidate_payload = dict(payload_with_owner)
+                    if not include_platform:
+                        candidate_payload.pop("platform", None)
+
+                    signature = tuple(sorted(candidate_payload.items()))
+                    if signature in seen_payload_signatures:
+                        continue
+
+                    seen_payload_signatures.add(signature)
+                    insert_variants.append(candidate_payload)
+
+            print("[BOT] Syncing meeting to Supabase Database...")
+            last_insert_error = None
+            for attempt_payload in insert_variants:
+                try:
+                    res = supabase_client.table("meetings").insert(attempt_payload).execute()
+                    if res.data and len(res.data) > 0:
+                        meeting_db_id = res.data[0]["id"]
+                    break
+                except Exception as insert_error:
+                    last_insert_error = insert_error
+
+            if meeting_db_id is None and last_insert_error is not None:
+                print(f"[Supabase Error] Could not create meeting: {last_insert_error}")
 
         if used_language_hint is None and language_hint is not None:
             print("[Transcription Info] Used auto language fallback after forced language produced no text.")
@@ -528,11 +1047,24 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
                         min_diff = diff
                         best_match = name
                 
-                # If we mapped a DOM visual indicator within an arbitrary ~5 second sync window
-                if min_diff < 5.0 and best_match:
+                # Prefer nearest DOM marker with a wider sync window for practical alignment drift.
+                if min_diff < 12.0 and best_match:
                     speaker = best_match
                 else:
-                    speaker = "Speaker"
+                    # Fallback: use latest known speaker before this segment when close enough.
+                    latest_prior_name = None
+                    latest_prior_ts = None
+                    for ts, name in dom_speaker_log:
+                        if ts <= seg.start and name:
+                            latest_prior_ts = ts
+                            latest_prior_name = name
+                        elif ts > seg.start:
+                            break
+
+                    if latest_prior_name is not None and latest_prior_ts is not None and (seg.start - latest_prior_ts) <= 20.0:
+                        speaker = latest_prior_name
+                    else:
+                        speaker = "Speaker"
 
             # -----------------------------------------------------
             # BRANCH B: Local Microphone (Resemblyzer AI Diarization)
@@ -541,7 +1073,9 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
                 try:
                     wav_seg = preprocess_wav(segment_audio, samplerate)
                     embed = encoder.embed_utterance(wav_seg)
-                    speaker = speaker_id(embed)
+                    if diarizer is None:
+                        raise RuntimeError("Speaker diarizer not initialized for local recording")
+                    speaker = diarizer.identify_speaker(embed)
                 except:
                     speaker = "Unknown"
 
@@ -590,13 +1124,35 @@ def process_audio_file(wav_path: str, title: str, language: str, participants: l
             if participants: f.write(f"=== PARTICIPANTS ===\n{', '.join(participants)}\n\n")
             f.write("=== TRANSCRIPT ===\n\n" + full_text)
             f.write("\n\n=== SUMMARY ===\n\n" + summary)
+
+        if run_post_meeting_integrations:
+            try:
+                integration_status = run_post_meeting_integrations(
+                    title=title or "Untitled Meeting",
+                    platform=platform,
+                    language=language_for_storage,
+                    summary=summary,
+                    transcript=full_text,
+                    participants=participants or [],
+                    output_filename=output_filename,
+                    requester_user_id=requester_user_id,
+                )
+                print(
+                    f"[Integrations] Slack={integration_status.get('slack')} "
+                    f"Jira={integration_status.get('jira')} "
+                    f"Notion={integration_status.get('notion')}"
+                )
+                for warning in integration_status.get("warnings", []):
+                    print(f"[Integrations Warning] {warning}")
+            except Exception as integration_error:  # noqa: BLE001
+                print(f"[Integrations Error] {integration_error}")
         
         return full_text, summary, output_filename
     except Exception as e:
         print(f"Transcription error: {str(e)}")
         return str(e), "", None
 
-def record_local(minutes: float, title: str, language: str, stop_event=None):
+def record_local(minutes: float, title: str, language: str, stop_event=None, requester_user_id: str = None, diarizer: SpeakerDiarizer = None):
     """Workflow 1: Local Microphone Capture.
 
     If stop_event is provided, recording continues until stop_event is set.
@@ -642,22 +1198,43 @@ def record_local(minutes: float, title: str, language: str, stop_event=None):
     wav_path = "temp_local.wav"
     wavfile.write(wav_path, SAMPLE_RATE, (np.clip(audio, -1, 1) * 32767).astype(np.int16))
 
-    res = process_audio_file(wav_path, title, language, None, None, platform="local")
+    res = process_audio_file(
+        wav_path,
+        title,
+        language,
+        None,
+        None,
+        platform="local",
+        requester_user_id=requester_user_id,
+        diarizer=diarizer,
+    )
     if os.path.exists(wav_path): os.remove(wav_path)
     return res
 
-def join_meeting_and_record(url: str, title: str, language: str, platform: str = "meet"):
+def join_meeting_and_record(
+    url: str,
+    title: str,
+    language: str,
+    platform: str = "meet",
+    requester_user_id: str = None,
+    live_event_callback=None,
+    diarizer: SpeakerDiarizer = None,
+):
     """Workflow 2: Online Bot Capture (Playwright + WASAPI Loopback)"""
     if not ONLINE_BOT_AVAILABLE:
         raise RuntimeError(
             "Online bot dependencies are missing. Install: pip install playwright pyaudiowpatch, then run: python -m playwright install chromium"
         )
 
+    platform = normalize_platform_name(platform)
+    if platform not in {"meet", "teams", "zoom"}:
+        platform = detect_platform_from_url(url)
+
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
 
     wav_path = "temp_meeting.wav"
-    stop_recording = False
+    stop_signal = threading.Event()
     participants = set()
 
     # Get platform-specific strategy
@@ -682,9 +1259,34 @@ def join_meeting_and_record(url: str, title: str, language: str, platform: str =
         wf.setsampwidth(pyaudio.get_sample_size(pyaudio.paInt16))
         wf.setframerate(int(default_speakers["defaultSampleRate"]))
 
+        audio_state = {
+            "last_activity_ts": time.time(),
+            "last_rms": 0.0,
+        }
+
         def audio_callback(in_data, frame_count, time_info, status):
-            if not stop_recording: wf.writeframes(in_data)
+            if not stop_signal.is_set():
+                wf.writeframes(in_data)
+
+                try:
+                    samples = np.frombuffer(in_data, dtype=np.int16)
+                    if samples.size > 0:
+                        normalized = samples.astype(np.float32) / 32768.0
+                        rms = float(np.sqrt(np.mean(normalized * normalized)))
+                        audio_state["last_rms"] = rms
+                        if rms >= AUDIO_ACTIVITY_RMS_THRESHOLD:
+                            audio_state["last_activity_ts"] = time.time()
+                except Exception:
+                    pass
             return (in_data, pyaudio.paContinue)
+
+        def emit_live_event(payload: dict):
+            if not callable(live_event_callback):
+                return
+            try:
+                live_event_callback(payload)
+            except Exception:
+                pass
 
         stream = p.open(format=pyaudio.paInt16,
                         channels=default_speakers["maxInputChannels"],
@@ -706,26 +1308,34 @@ def join_meeting_and_record(url: str, title: str, language: str, platform: str =
         with sync_playwright() as pw:
             user_data_path = os.path.join(SCRIPT_DIR, "bot_profile")
 
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=user_data_path,
-                channel="chrome",
-                headless=False,
-                args=[
+            browser_launch_kwargs = {
+                "user_data_dir": user_data_path,
+                "headless": PLAYWRIGHT_HEADLESS,
+                "args": [
                     '--use-fake-ui-for-media-stream',
                     '--disable-blink-features=AutomationControlled',
                     '--profile-directory=Default',
-                    '--disable-guest-mode'
+                    '--disable-guest-mode',
                 ],
-                ignore_default_args=["--enable-automation"],
-                permissions=['camera', 'microphone']
-            )
-            page = context.pages[0]
+                "ignore_default_args": ["--enable-automation"],
+                "permissions": ['camera', 'microphone'],
+            }
+            if PLAYWRIGHT_CHANNEL:
+                browser_launch_kwargs["channel"] = PLAYWRIGHT_CHANNEL
+
+            context = pw.chromium.launch_persistent_context(**browser_launch_kwargs)
+            page = context.pages[0] if context.pages else context.new_page()
 
             # Authentication check (platform-specific)
             print("\n[BOT] Checking authentication status...")
             auth_url = strategy.get_auth_check_url()
             if auth_url:
-                page.goto(auth_url)
+                navigate_with_fallback(
+                    page,
+                    auth_url,
+                    label=f"{strategy.get_platform_name()} auth page",
+                    timeout_ms=60000,
+                )
                 page.wait_for_timeout(3000)
                 if not strategy.is_logged_in(page):
                     print(f"\n[BOT] ⚠️ You are not logged in to {strategy.get_platform_name()}! The platform's security blocks robots from typing passwords.")
@@ -752,7 +1362,12 @@ def join_meeting_and_record(url: str, title: str, language: str, platform: str =
             recording_start_time = time.time()
             print("[BOT] Audio recording started (System Volume Loopback active)")
 
-            page.goto(url)
+            navigate_with_fallback(
+                page,
+                url,
+                label=f"{strategy.get_platform_name()} meeting page",
+                timeout_ms=90000,
+            )
 
             try:
                 page.wait_for_timeout(3000)
@@ -766,9 +1381,10 @@ def join_meeting_and_record(url: str, title: str, language: str, platform: str =
 
             # Simple Background Input Listener to stop manually
             def check_quit():
-                while not stop_recording:
+                while not stop_signal.is_set():
                     try:
                         if input().strip().lower() == 'q':
+                            stop_signal.set()
                             return
                     except EOFError:
                         # Non-interactive runs (like API servers) may not have stdin.
@@ -776,6 +1392,9 @@ def join_meeting_and_record(url: str, title: str, language: str, platform: str =
             threading.Thread(target=check_quit, daemon=True).start()
 
             dom_speaker_log = []
+            last_emitted_speaker = ""
+            last_speaker_emit_ts = 0.0
+            last_caption_signature = ""
 
             # Enable captions (platform-specific)
             try:
@@ -785,34 +1404,105 @@ def join_meeting_and_record(url: str, title: str, language: str, platform: str =
                 pass
 
             # Poll for participants while recording
-            while not stop_recording:
+            while not stop_signal.is_set():
+                now = time.time()
+
+                if now - recording_start_time >= ONLINE_MAX_DURATION_SECONDS:
+                    print("[BOT] Online recording reached configured max duration. Stopping capture.")
+                    stop_signal.set()
+                    break
+
+                if (
+                    now - recording_start_time >= ONLINE_IDLE_MIN_RUNTIME_SECONDS
+                    and now - audio_state.get("last_activity_ts", now) >= ONLINE_IDLE_STOP_SECONDS
+                ):
+                    print("[BOT] No meeting audio detected for a while. Stopping recording.")
+                    stop_signal.set()
+                    break
+
+                try:
+                    if page.is_closed():
+                        print("[BOT] Meeting page closed. Stopping recording.")
+                        stop_signal.set()
+                        break
+                except Exception:
+                    pass
+
+                speaker_name = None
+
                 try:
                     speaker_name = strategy.get_active_speaker(page)
                     if speaker_name:
                         rel_timestamp = time.time() - recording_start_time
                         dom_speaker_log.append((rel_timestamp, speaker_name))
                         participants.add(speaker_name)
+                        if speaker_name != last_emitted_speaker or (time.time() - last_speaker_emit_ts) >= 2.0:
+                            emit_live_event(
+                                {
+                                    "type": "speaker",
+                                    "active_speaker": speaker_name,
+                                    "participants": sorted(participants),
+                                    "elapsed_seconds": rel_timestamp,
+                                    "last_audio_rms": audio_state.get("last_rms", 0.0),
+                                }
+                            )
+                            last_emitted_speaker = speaker_name
+                            last_speaker_emit_ts = time.time()
+                except:
+                    pass
+
+                try:
+                    caption = strategy.get_latest_caption(page)
+                    if caption and caption.get("text"):
+                        rel_timestamp = time.time() - recording_start_time
+                        caption_speaker = caption.get("speaker") or speaker_name or "Participant"
+                        caption_text = re.sub(r"\s+", " ", caption.get("text", "")).strip()
+                        if caption_text:
+                            participants.add(caption_speaker)
+                            signature = f"{caption_speaker.lower()}::{caption_text.lower()}"
+                            if signature != last_caption_signature:
+                                last_caption_signature = signature
+                                emit_live_event(
+                                    {
+                                        "type": "caption",
+                                        "active_speaker": caption_speaker,
+                                        "caption_text": caption_text,
+                                        "participants": sorted(participants),
+                                        "elapsed_seconds": rel_timestamp,
+                                        "last_audio_rms": audio_state.get("last_rms", 0.0),
+                                    }
+                                )
                 except:
                     pass
 
                 # Auto-stop if meeting ended indicator appears
                 try:
-                    if page.locator(f'text={strategy.get_meeting_ended_selector()}').is_visible(timeout=500):
-                        print("[BOT] Meeting ended naturally.")
+                    if strategy.has_meeting_ended(page):
+                        print(f"[BOT] {strategy.get_platform_name()} meeting ended. Stopping recording.")
+                        stop_signal.set()
                         break
                 except:
                     pass
 
                 time.sleep(0.5)
 
-            stop_recording = True
+            stop_signal.set()
             stream.stop_stream()
             stream.close()
             wf.close()
             context.close()
 
     print("[BOT] Extraction finished.")
-    res = process_audio_file(wav_path, title, language, list(participants), dom_speaker_log=dom_speaker_log, platform=platform)
+    res = process_audio_file(
+        wav_path,
+        title,
+        language,
+        list(participants),
+        dom_speaker_log=dom_speaker_log,
+        platform=platform,
+        requester_user_id=requester_user_id,
+        diarizer=diarizer,
+    )
     if os.path.exists(wav_path): os.remove(wav_path)
     return res
 
@@ -830,11 +1520,7 @@ def main():
     if choice == "2":
         url = input("Enter meeting URL: ").strip()
         # Auto-detect platform from URL
-        platform = "meet"
-        if "teams.microsoft.com" in url:
-            platform = "teams"
-        elif "zoom.us" in url:
-            platform = "zoom"
+        platform = detect_platform_from_url(url)
         print(f"Detected platform: {strategy.get_platform_name() if (strategy := get_strategy(platform)) else 'Unknown'}")
         transcript, summary, filename = join_meeting_and_record(url, title, language, platform=platform)
     else:

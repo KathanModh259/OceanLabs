@@ -27,18 +27,37 @@ const OFFLINE_STATUS_POLL_ATTEMPTS = 120
 
 const PLATFORM_HOST_RULES = {
   meet: ['meet.google.com'],
-  teams: ['teams.microsoft.com'],
-  zoom: ['zoom.us'],
+  teams: ['teams.microsoft.com', 'teams.live.com', 'teams.cloud.microsoft'],
+  zoom: ['zoom.us', 'zoomgov.com', 'zoom.com.cn'],
 }
 
 const GOOGLE_MEET_CODE_REGEX = /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/i
+
+const PLATFORM_LINK_HINTS = {
+  meet: 'Use a Google Meet link, or just the code like abc-defg-hij.',
+  teams: 'Use a Microsoft Teams web join link from teams.microsoft.com or teams.live.com.',
+  zoom: 'Use a Zoom join link from zoom.us (or regional/government Zoom domains).',
+}
+
+function getPlatformLabel(platform) {
+  if (platform === 'meet') return 'Google Meet'
+  if (platform === 'teams') return 'Microsoft Teams'
+  if (platform === 'zoom') return 'Zoom'
+  return 'Meeting'
+}
+
+function getMeetingUrlPlaceholder(platform) {
+  if (platform === 'teams') return 'https://teams.microsoft.com/l/meetup-join/...'
+  if (platform === 'zoom') return 'https://us02web.zoom.us/j/...'
+  return 'https://meet.google.com/...'
+}
 
 function toFriendlyError(message) {
   if (!message) return 'Failed to create meeting event.'
   const normalized = message.toLowerCase()
   if (normalized.includes('network')) return 'Network issue while saving. Please retry.'
   if (normalized.includes('does not match selected platform')) {
-    return 'The link does not match selected platform. For Google Meet, paste full link or meeting code like cyo-qfpw-fir.'
+    return 'The link does not match selected platform. Verify the platform selection and paste a web join link from that platform.'
   }
   return message
 }
@@ -75,7 +94,7 @@ function validateOnlineMeetingUrl(rawUrl, platform) {
   const isAllowedHost = allowedHosts.some((allowedHost) => host === allowedHost || host.endsWith(`.${allowedHost}`))
 
   if (!isAllowedHost) {
-    const label = platform === 'meet' ? 'Google Meet' : platform === 'teams' ? 'Microsoft Teams' : 'Zoom'
+    const label = getPlatformLabel(platform)
     throw new Error(`URL does not match selected platform (${label}).`)
   }
 
@@ -237,6 +256,7 @@ export function StartRecordingDialog({
       setError(toFriendlyError(stopError?.message))
       setLoading(false)
       setOfflineTranscribing(false)
+      setOfflineRecordingId('')
       return
     }
 
@@ -271,63 +291,63 @@ export function StartRecordingDialog({
       <DialogTrigger asChild>
         {floating ? (
           <button
-            className="group fixed bottom-6 right-6 z-50 h-14 w-14 rounded-full bg-indigo-600 shadow-xl shadow-indigo-500/25 transition-all duration-200 hover:bg-indigo-500 hover:scale-105"
+            className="group fixed bottom-6 right-6 z-50 h-14 w-14 rounded-full border border-slate-600/80 bg-teal-500 shadow-xl shadow-teal-500/25 transition-all duration-200 hover:scale-105 hover:bg-teal-400"
             aria-label="Create meeting event"
           >
             <Video className="mx-auto h-6 w-6 text-white" />
           </button>
         ) : (
-          <Button className="h-10 bg-indigo-600 px-4 font-semibold text-white hover:bg-indigo-500">
+          <Button className="h-10 border border-slate-600/80 bg-teal-500 px-4 font-semibold text-white hover:bg-teal-400">
             <Plus className="mr-1 h-4 w-4" />
             {triggerLabel}
           </Button>
         )}
       </DialogTrigger>
 
-      <DialogContent className="sm:max-w-[560px] border border-neutral-200 bg-white p-0">
-        <DialogHeader className="border-b border-neutral-200 px-6 py-5">
-          <DialogTitle className="flex items-center gap-2 text-lg font-semibold text-neutral-900">
-            <Mic className="h-4 w-4 text-indigo-600" />
+      <DialogContent className="sm:max-w-[560px] border border-slate-700/70 bg-slate-950/95 p-0 text-white backdrop-blur-2xl">
+        <DialogHeader className="border-b border-slate-700/70 px-6 py-5">
+          <DialogTitle className="flex items-center gap-2 text-lg font-semibold text-white">
+            <Mic className="h-4 w-4 text-teal-300" />
             Create Meeting Event
           </DialogTitle>
-          <DialogDescription className="text-sm text-neutral-600">
+          <DialogDescription className="text-sm text-slate-300/80">
             Choose online or offline meeting. Offline mode records your voice, then transcribes automatically after stop.
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4 px-6 py-5">
           <div className="grid gap-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Meeting Type</label>
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-300/80">Meeting Type</label>
             <Select value={meetingType} onValueChange={handleMeetingTypeChange}>
-              <SelectTrigger className="h-10 border-neutral-200 bg-neutral-50">
+              <SelectTrigger className="h-10 border-slate-600/80 bg-slate-900/70 text-white data-placeholder:text-slate-500">
                 <SelectValue placeholder="Select type" />
               </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="online">Online</SelectItem>
-                <SelectItem value="offline">Offline</SelectItem>
+              <SelectContent className="border border-slate-700/70 bg-slate-900 text-white">
+                <SelectItem value="online" className="focus:bg-slate-800/80 focus:text-white">Online</SelectItem>
+                <SelectItem value="offline" className="focus:bg-slate-800/80 focus:text-white">Offline</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="grid gap-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Topic / Meeting Name</label>
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-300/80">Topic / Meeting Name</label>
             <Input
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               placeholder="Enter meeting topic"
-              className="h-10 border-neutral-200 bg-neutral-50"
+              className="h-10 border-slate-600/80 bg-slate-900/70 text-white placeholder:text-slate-500"
               maxLength={MAX_TITLE_LENGTH}
               required
             />
           </div>
 
           <div className="grid gap-1.5">
-            <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Preferred Language</label>
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-300/80">Preferred Language</label>
             <Input
               value={language}
               onChange={(event) => setLanguage(event.target.value)}
               placeholder="Auto (supports mixed languages)"
-              className="h-10 border-neutral-200 bg-neutral-50"
+              className="h-10 border-slate-600/80 bg-slate-900/70 text-white placeholder:text-slate-500"
               maxLength={MAX_LANGUAGE_LENGTH}
             />
           </div>
@@ -335,43 +355,43 @@ export function StartRecordingDialog({
           {isOnline ? (
             <>
               <div className="grid gap-1.5">
-                <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Online Platform</label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-300/80">Online Platform</label>
                 <Select value={platform} onValueChange={setPlatform}>
-                  <SelectTrigger className="h-10 border-neutral-200 bg-neutral-50">
+                  <SelectTrigger className="h-10 border-slate-600/80 bg-slate-900/70 text-white data-placeholder:text-slate-500">
                     <SelectValue placeholder="Select platform" />
                   </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="meet">Google Meet</SelectItem>
-                    <SelectItem value="teams">Microsoft Teams</SelectItem>
-                    <SelectItem value="zoom">Zoom</SelectItem>
+                  <SelectContent className="border border-slate-700/70 bg-slate-900 text-white">
+                    <SelectItem value="meet" className="focus:bg-slate-800/80 focus:text-white">Google Meet</SelectItem>
+                    <SelectItem value="teams" className="focus:bg-slate-800/80 focus:text-white">Microsoft Teams</SelectItem>
+                    <SelectItem value="zoom" className="focus:bg-slate-800/80 focus:text-white">Zoom</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
               <div className="grid gap-1.5">
-                <label className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Meeting Link</label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-300/80">Meeting Link</label>
                 <Input
                   value={url}
                   onChange={(event) => setUrl(event.target.value)}
-                  placeholder="https://meet.google.com/..."
-                  className="h-10 border-neutral-200 bg-neutral-50"
+                  placeholder={getMeetingUrlPlaceholder(platform)}
+                  className="h-10 border-slate-600/80 bg-slate-900/70 text-white placeholder:text-slate-500"
                   autoComplete="off"
                   required
                 />
               </div>
 
-              <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
-                Your meeting assistant will request access automatically after creation.
+              <div className="rounded-lg border border-teal-400/25 bg-teal-500/10 px-3 py-2 text-xs text-teal-300">
+                {PLATFORM_LINK_HINTS[platform] || 'Use a valid web join link.'} Your meeting assistant will request access automatically after creation.
               </div>
             </>
           ) : (
             <>
-              <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+              <div className="rounded-lg border border-violet-500/20 bg-violet-500/10 px-3 py-2 text-xs text-violet-300">
                 Voice command flow: Start recording, speak naturally, then Stop recording to trigger transcription.
               </div>
 
               {offlineStateMessage ? (
-                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
                   {offlineStateMessage}
                 </div>
               ) : null}
@@ -379,24 +399,24 @@ export function StartRecordingDialog({
           )}
 
           {error ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-300">
               {error}
             </div>
           ) : null}
 
-          <DialogFooter className="border-t border-neutral-200 pt-4">
+          <DialogFooter className="-mx-6 -mb-5 rounded-none border-t border-slate-700/70 bg-transparent px-6 pt-4">
             <Button
               type="button"
               variant="outline"
               onClick={() => setOpen(false)}
-              className="h-10 border-neutral-300"
+              className="h-10 border-slate-600/80 bg-slate-900/70 text-white/80 hover:bg-slate-800/80 hover:text-white"
               disabled={loading || isDialogLocked}
             >
               Cancel
             </Button>
 
             {isOnline ? (
-              <Button type="submit" disabled={loading} className="h-10 bg-indigo-600 font-semibold text-white hover:bg-indigo-500">
+              <Button type="submit" disabled={loading} className="h-10 border border-slate-600/80 bg-teal-500 font-semibold text-white hover:bg-teal-400">
                 {loading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -407,7 +427,7 @@ export function StartRecordingDialog({
                 )}
               </Button>
             ) : offlineTranscribing ? (
-              <Button type="button" disabled className="h-10 bg-indigo-600 font-semibold text-white">
+              <Button type="button" disabled className="h-10 border border-slate-600/80 bg-teal-500/80 font-semibold text-white">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Transcribing...
               </Button>
@@ -416,7 +436,7 @@ export function StartRecordingDialog({
                 type="button"
                 onClick={handleStopOfflineRecording}
                 disabled={loading}
-                className="h-10 bg-rose-600 font-semibold text-white hover:bg-rose-500"
+                className="h-10 border border-rose-400/30 bg-rose-500/80 font-semibold text-white hover:bg-rose-500"
               >
                 {loading ? (
                   <>
@@ -432,7 +452,7 @@ export function StartRecordingDialog({
                 type="button"
                 onClick={handleStartOfflineRecording}
                 disabled={loading}
-                className="h-10 bg-indigo-600 font-semibold text-white hover:bg-indigo-500"
+                className="h-10 border border-slate-600/80 bg-teal-500 font-semibold text-white hover:bg-teal-400"
               >
                 {loading ? (
                   <>

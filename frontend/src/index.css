@@ -1,15 +1,112 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
-  body {
-    font-family: 'Inter', sans-serif;
+  :root {
+    --app-bg: #070a0e;
+    --app-teal: #2dd4bf;
+    --app-amber: #f59e0b;
   }
+
+  body {
+    font-family: 'Manrope', sans-serif;
+    background: var(--app-bg);
+    color: #f8fafc;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
+
+.font-display {
+  font-family: 'Sora', 'Manrope', sans-serif;
+}
+
+@keyframes appFloatSlow {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0, -14px, 0) scale(1.03);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes appPulse {
+  0% {
+    opacity: 0.28;
+  }
+  50% {
+    opacity: 0.45;
+  }
+  100% {
+    opacity: 0.28;
+  }
+}
+
+.app-shell {
+  background:
+    radial-gradient(940px 640px at -6% -12%, rgba(45, 212, 191, 0.13), transparent 62%),
+    radial-gradient(760px 560px at 104% -8%, rgba(245, 158, 11, 0.11), transparent 60%),
+    radial-gradient(900px 620px at 50% 118%, rgba(71, 85, 105, 0.16), transparent 65%),
+    linear-gradient(180deg, #090d12 0%, #04070b 100%);
+  isolation: isolate;
+}
+
+.app-atmosphere {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: repeating-linear-gradient(
+    120deg,
+    rgba(148, 163, 184, 0.06) 0,
+    rgba(148, 163, 184, 0.06) 1px,
+    transparent 1px,
+    transparent 24px
+  );
+  mask-image: radial-gradient(circle at center, black 28%, transparent 100%);
+  opacity: 0.06;
+}
+
+.app-orb {
+  position: fixed;
+  pointer-events: none;
+  z-index: 0;
+  border-radius: 9999px;
+  filter: blur(110px);
+  animation: appFloatSlow 12s ease-in-out infinite;
+}
+
+.app-orb--one {
+  top: -170px;
+  left: -130px;
+  width: 480px;
+  height: 480px;
+  background: rgba(45, 212, 191, 0.15);
+}
+
+.app-orb--two {
+  right: -150px;
+  bottom: -140px;
+  width: 420px;
+  height: 420px;
+  background: rgba(245, 158, 11, 0.12);
+  animation-name: appPulse;
+  animation-duration: 9s;
+}
+
+.hero-accent-word {
+  background-image: linear-gradient(96deg, #5eead4 4%, #fcd34d 92%);
 }
 
 @keyframes heroStepIn {
