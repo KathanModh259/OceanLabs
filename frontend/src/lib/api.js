@@ -6,6 +6,9 @@
 import { supabase } from './supabase';
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+let authFailureState = {
+  failed: false,
+}
 
 function toWebSocketBase(httpBaseUrl) {
   return httpBaseUrl
@@ -20,22 +23,49 @@ const API_WS_BASE = toWebSocketBase(API_BASE)
  * Get the current access token from Supabase session.
  * @returns {Promise<string|null>}
  */
-async function getAuthToken() {
+async function getAuthToken(options = {}) {
+  const { allowRefresh = true } = options;
+
   try {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token || null;
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    let token = session?.access_token || null;
+    if (!token && allowRefresh) {
+      const { data: refreshedData, error: refreshError } = await supabase.auth.refreshSession();
+      if (!refreshError) {
+        token = refreshedData?.session?.access_token || null;
+      }
+    }
+
+    if (token) {
+      authFailureState = { failed: false };
+    }
+    return token;
   } catch {
     return null;
   }
 }
 
+function createAuthError() {
+  return new Error('Authentication required. Please log in again.');
+}
+
 /**
  * Build headers with JWT authorization.
  * @param {Object} extraHeaders
+ * @param {{ requireAuth?: boolean }} options
  * @returns {Promise<Headers>}
  */
-async function buildAuthHeaders(extraHeaders = {}) {
-  const token = await getAuthToken();
+async function buildAuthHeaders(extraHeaders = {}, options = {}) {
+  const { requireAuth = true } = options;
+  const token = await getAuthToken({ allowRefresh: requireAuth });
+
+  if (requireAuth && !token) {
+    throw createAuthError();
+  }
+
   const headers = new Headers({
     'Content-Type': 'application/json',
     ...extraHeaders,
@@ -46,6 +76,33 @@ async function buildAuthHeaders(extraHeaders = {}) {
   return headers;
 }
 
+async function fetchWithAuthRetry(url, options = {}) {
+  const { retryOnUnauthorized = true, ...fetchOptions } = options;
+  const initialHeaders = await buildAuthHeaders(fetchOptions.headers || {});
+
+  let response = await fetch(url, {
+    ...fetchOptions,
+    headers: initialHeaders,
+  });
+
+  if (response.status !== 401 || !retryOnUnauthorized) {
+    return response;
+  }
+
+  const refreshedToken = await getAuthToken({ allowRefresh: true });
+  if (!refreshedToken) {
+    return response;
+  }
+
+  const retryHeaders = await buildAuthHeaders(fetchOptions.headers || {});
+  response = await fetch(url, {
+    ...fetchOptions,
+    headers: retryHeaders,
+  });
+
+  return response;
+}
+
 function toApiErrorMessage(response, detail, fallbackMessage) {
   const normalizedDetail = typeof detail === 'string' ? detail.trim() : '';
 
@@ -54,9 +111,8 @@ function toApiErrorMessage(response, detail, fallbackMessage) {
   }
 
   if (response.status === 401) {
-    // Force re-login
-    supabase.auth.signOut();
-    setTimeout(() => window.location.href = '/auth', 100);
+    // Mark auth failure but avoid immediate forced logout on transient verification issues.
+    authFailureState.failed = true;
     return 'Session expired. Please log in again.';
   }
 
@@ -69,10 +125,8 @@ function toApiErrorMessage(response, detail, fallbackMessage) {
  * @returns {Promise<Object>} - { recording_id, status }
  */
 export async function startRecording(data) {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/start-recording`, {
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/start-recording`, {
     method: 'POST',
-    headers,
     body: JSON.stringify(data),
   });
 
@@ -89,8 +143,7 @@ export async function startRecording(data) {
  * @returns {Promise<Array>}
  */
 export async function listRecordings() {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/recordings`, { headers });
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/recordings`);
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '' }));
@@ -106,8 +159,7 @@ export async function listRecordings() {
  * @returns {Promise<Object>}
  */
 export async function getRecordingDetails(recordingId) {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/recordings/${encodeURIComponent(recordingId)}`, { headers });
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/recordings/${encodeURIComponent(recordingId)}`);
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '' }))
@@ -129,43 +181,54 @@ export async function getRecordingDetails(recordingId) {
 export function startRecordingStream(recordingId, handlers = {}) {
   const safeRecordingId = (recordingId || '').trim();
   if (!safeRecordingId) return () => {};
-
-  // Get token synchronously via getSession() (may be cached)
-  let token = '';
-  try {
-    const { data: { session } } = supabase.auth.getSession();
-    token = session?.access_token || '';
-  } catch {
-    // Silent fail - WebSocket will connect without token
-  }
-
   const streamPath = `/api/recordings/${encodeURIComponent(safeRecordingId)}/stream`;
-  const socketUrl = token
-    ? `${API_WS_BASE}${streamPath}?token=${encodeURIComponent(token)}`
-    : `${API_WS_BASE}${streamPath}`;
+  let socket = null;
+  let disposed = false;
 
-  const socket = new WebSocket(socketUrl);
+  getAuthToken()
+    .then((token) => {
+      if (disposed) return;
 
-  socket.onmessage = (event) => {
-    if (!handlers?.onEvent) return;
-    try {
-      const parsed = JSON.parse(event.data);
-      handlers.onEvent(parsed);
-    } catch (parseError) {
-      handlers.onError?.(parseError);
-    }
-  };
+      if (!token) {
+        handlers.onError?.(createAuthError());
+        handlers.onClose?.({
+          code: 4401,
+          reason: 'Missing authentication token',
+          wasClean: true,
+        });
+        return;
+      }
 
-  socket.onerror = (errorEvent) => {
-    handlers.onError?.(errorEvent);
-  };
+      const socketUrl = `${API_WS_BASE}${streamPath}?token=${encodeURIComponent(token)}`;
+      socket = new WebSocket(socketUrl);
 
-  socket.onclose = (closeEvent) => {
-    handlers.onClose?.(closeEvent);
-  };
+      socket.onmessage = (event) => {
+        if (!handlers?.onEvent) return;
+        try {
+          const parsed = JSON.parse(event.data);
+          handlers.onEvent(parsed);
+        } catch (parseError) {
+          handlers.onError?.(parseError);
+        }
+      };
+
+      socket.onerror = (errorEvent) => {
+        handlers.onError?.(errorEvent);
+      };
+
+      socket.onclose = (closeEvent) => {
+        handlers.onClose?.(closeEvent);
+      };
+    })
+    .catch((error) => {
+      if (!disposed) {
+        handlers.onError?.(error);
+      }
+    });
 
   return () => {
-    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+    disposed = true;
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
       socket.close();
     }
   };
@@ -177,10 +240,8 @@ export function startRecordingStream(recordingId, handlers = {}) {
  * @returns {Promise<Object>}
  */
 export async function stopRecording(recordingId) {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/stop-recording/${encodeURIComponent(recordingId)}`, {
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/stop-recording/${encodeURIComponent(recordingId)}`, {
     method: 'POST',
-    headers,
   });
 
   if (!response.ok) {
@@ -196,8 +257,7 @@ export async function stopRecording(recordingId) {
  * @returns {Promise<Object>}
  */
 export async function getIntegrationsStatus() {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/integrations/status`, { headers });
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/integrations/status`);
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '' }));
@@ -213,10 +273,8 @@ export async function getIntegrationsStatus() {
  * @returns {Promise<Object>}
  */
 export async function runIntegrationsSmokeTest(payload = {}) {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/integrations/test`, {
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/integrations/test`, {
     method: 'POST',
-    headers,
     body: JSON.stringify(payload),
   });
 
@@ -235,14 +293,9 @@ export async function runIntegrationsSmokeTest(payload = {}) {
  * @returns {Promise<Object>}
  */
 export async function startIntegrationOAuth(provider, nextUrl) {
-  const headers = await buildAuthHeaders();
-  const token = await getAuthToken();
-  if (!token) throw new Error('Authentication required');
-
   const params = new URLSearchParams({ next_url: nextUrl || '' });
-  const response = await fetch(`${API_BASE}/api/integrations/oauth/${encodeURIComponent(provider)}/start?${params.toString()}`, {
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/integrations/oauth/${encodeURIComponent(provider)}/start?${params.toString()}`, {
     method: 'GET',
-    headers,  // Authorization header
   });
 
   if (!response.ok) {
@@ -259,10 +312,8 @@ export async function startIntegrationOAuth(provider, nextUrl) {
  * @returns {Promise<Object>}
  */
 export async function saveIntegrationConfig(payload) {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/integrations/config`, {
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/integrations/config`, {
     method: 'POST',
-    headers,
     body: JSON.stringify(payload),
   });
 
@@ -280,10 +331,8 @@ export async function saveIntegrationConfig(payload) {
  * @returns {Promise<Object>}
  */
 export async function disconnectIntegration(payload) {
-  const headers = await buildAuthHeaders();
-  const response = await fetch(`${API_BASE}/api/integrations/disconnect`, {
+  const response = await fetchWithAuthRetry(`${API_BASE}/api/integrations/disconnect`, {
     method: 'POST',
-    headers,
     body: JSON.stringify(payload),
   });
 

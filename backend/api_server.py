@@ -17,25 +17,34 @@ from collections import defaultdict
 # Ensure we can import from the same directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Import auth module
-try:
-    from auth import get_current_user, require_auth
-    AUTH_AVAILABLE = True
-except Exception as auth_import_error:
-    AUTH_AVAILABLE = False
-    AUTH_ERROR = str(auth_import_error)
-    # In production, auth is required. This is for development fallback.
-    async def get_current_user(request: Request):
-        return {"sub": "anonymous", "email": "anonymous@example.com"}
-    require_auth = lambda: Depends(get_current_user)
-
 try:
     from dotenv import load_dotenv
 except Exception:  # noqa: BLE001
     load_dotenv = None
 
 if load_dotenv is not None:
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    # Load backend .env before importing auth so SUPABASE_URL is available at auth module import time.
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
+
+# Import auth module
+try:
+    from auth import get_current_user, require_auth, verify_supabase_jwt
+    AUTH_AVAILABLE = True
+except Exception as auth_import_error:
+    AUTH_AVAILABLE = False
+    AUTH_ERROR = str(auth_import_error)
+    # In production, auth is required. This is for development fallback.
+    async def get_current_user(request: Request):
+        # Preserve compatibility for local/dev clients that still send ?user_id=...
+        fallback_user_id = (request.query_params.get("user_id") or "").strip() or "anonymous"
+        return {"sub": fallback_user_id, "email": "anonymous@example.com"}
+
+    async def require_auth(request: Request):
+        return await get_current_user(request)
+
+    def verify_supabase_jwt(token: str):
+        fallback_user_id = (token or "").strip() or "anonymous"
+        return {"sub": fallback_user_id, "email": "anonymous@example.com"}
 
 try:
     from integrations import dispatch_post_meeting_integrations
@@ -549,6 +558,14 @@ def start_recording_session(
     from app import SpeakerDiarizer
     diarizer = SpeakerDiarizer()
 
+    requester_user_id = None
+    if isinstance(current_user, dict):
+        requester_user_id = (current_user.get("sub") or "").strip() or None
+
+    effective_metadata = dict(metadata or {})
+    if requester_user_id:
+        effective_metadata["user_id"] = requester_user_id
+
     recording_id = str(uuid.uuid4())
     stop_event = threading.Event() if platform == "local" and safe_manual_stop else None
 
@@ -564,7 +581,7 @@ def start_recording_session(
         "output_filename": None,
         "stop_event": stop_event,
         "source": source,
-        "metadata": metadata or {},
+        "metadata": effective_metadata,
         "active_speaker": None,
         "participants": [],
         "elapsed_seconds": 0.0,
@@ -605,8 +622,7 @@ def start_recording_session(
         publish_recording_event(recording_id, payload)
 
     def run_bot():
-        # Use authenticated user ID from JWT, ignoring any user_id from metadata
-        requester_user_id = current_user.get("sub") if current_user else None
+        # Use authenticated user ID from JWT (captured at session start)
         try:
             if platform == "local":
                 stop_flag = active_recordings.get(recording_id, {}).get("stop_event")
