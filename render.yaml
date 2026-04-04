@@ -2,7 +2,7 @@ services:
   - type: web
     name: oceanlabs-api-1281
     runtime: docker
-    dockerContext: ./backend
+    dockerContext: .
     dockerfilePath: ./backend/Dockerfile
     plan: free
     autoDeploy: true

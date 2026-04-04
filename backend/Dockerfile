@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.cloud.txt /tmp/requirements.cloud.txt
+COPY backend/requirements.cloud.txt /tmp/requirements.cloud.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.cloud.txt
 
 COPY . /app
@@ -22,4 +22,4 @@ RUN python -m playwright install chromium
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python -m uvicorn api_server:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "python -m uvicorn backend.api_server:app --host 0.0.0.0 --port ${PORT:-8000}"]
