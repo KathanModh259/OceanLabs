@@ -42,7 +42,6 @@ services:
   - type: web
     name: oceanlabs-web
     runtime: static
-    plan: free
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
