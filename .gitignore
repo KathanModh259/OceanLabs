@@ -59,6 +59,7 @@ transcripts/
 *.txt
 !README.txt
 !backend/requirements.txt
+!backend/requirements.cloud.txt
 
 # ── Build / Distribution ─────────────────────
 build/
