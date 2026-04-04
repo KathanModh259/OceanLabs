@@ -18,12 +18,12 @@ Render deploys from GitHub, so make sure your latest code is pushed.
 4. Select branch and deploy.
 
 Render will create two services from [render.yaml](render.yaml):
-- `oceanlabs-api` (backend, Docker)
+- `oceanlabs-api-1281` (backend, Docker)
 - `oceanlabs-web` (frontend static site)
 
 ## 3) Set Backend Environment Variables
 
-Use [backend/.env.cloud.example](backend/.env.cloud.example) as reference and set these in Render for `oceanlabs-api`:
+Use [backend/.env.cloud.example](backend/.env.cloud.example) as reference and set these in Render for `oceanlabs-api-1281`:
 
 - `ENVIRONMENT=production`
 - `FRONTEND_ORIGINS=https://<your-frontend-domain>`

@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: oceanlabs-api
+    name: oceanlabs-api-1281
     runtime: docker
     dockerContext: .
     dockerfilePath: ./backend/Dockerfile
